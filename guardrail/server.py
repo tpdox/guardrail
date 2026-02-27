@@ -117,7 +117,8 @@ def _json_default(obj):
 def _get_config() -> GuardrailConfig:
     global _config
     if _config is None:
-        _config = GuardrailConfig()
+        config_path = find_config_path()
+        _config = load_config(config_path)
     return _config
 
 
