@@ -112,7 +112,7 @@ def _distribution_checks(meta: ModelMeta) -> list[Check]:
         ))
 
         # Unexpected values only
-        quoted = ", ".join(f"'{v}'" for v in expected_values)
+        quoted = ", ".join(f"'{v.replace(chr(39), chr(39)+chr(39))}'" for v in expected_values)
         checks.append(Check(
             category="distribution",
             model=meta.name,

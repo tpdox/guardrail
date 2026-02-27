@@ -190,6 +190,7 @@ async def handle_status(arguments: dict) -> dict:
     manifest_age = None
     model_count = 0
     test_count = 0
+    manifest = None
 
     if manifest_path.exists():
         mtime = os.path.getmtime(manifest_path)
@@ -204,8 +205,7 @@ async def handle_status(arguments: dict) -> dict:
 
     changed_models = []
     blast_radius_names = []
-    if manifest_path.exists() and changed_paths:
-        manifest = load_manifest(project_dir)
+    if manifest is not None and changed_paths:
         changed_ids = []
         for p in changed_paths:
             uid = manifest.resolve_file_path(p)

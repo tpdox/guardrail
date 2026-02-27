@@ -194,14 +194,14 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
     {% for chart in dist_charts %}
     <div class="chart-container" id="{{ chart.id }}"></div>
     <script>
-    Plotly.newPlot('{{ chart.id }}', [{
+    Plotly.newPlot({{ chart.id | tojson }}, [{
       type: 'bar',
       orientation: 'h',
       y: {{ chart.labels | tojson }},
       x: {{ chart.values | tojson }},
       marker: { color: '#58a6ff' }
     }], {
-      title: { text: '{{ chart.title }}', font: { color: '#e6edf3', size: 14 } },
+      title: { text: {{ chart.title | tojson }}, font: { color: '#e6edf3', size: 14 } },
       paper_bgcolor: '#161b22',
       plot_bgcolor: '#161b22',
       font: { color: '#8b949e' },
