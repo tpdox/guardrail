@@ -30,6 +30,16 @@ _config: GuardrailConfig | None = None
 _sf_client = None  # lazy import to avoid import errors if snowflake not needed
 
 
+def _json_default(obj):
+    """Handle Snowflake types (Decimal, datetime, etc.) for JSON serialization."""
+    from decimal import Decimal
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _get_config() -> GuardrailConfig:
     global _config
     if _config is None:
@@ -239,7 +249,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
     try:
         result = await handler(arguments)
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=_json_default))]
     except Exception as e:
         return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
@@ -624,7 +634,7 @@ async def handle_run_edge_cases(arguments: dict) -> dict:
 
         existing["semantic_results"] = results
         with open(results_path, "w") as f:
-            json.dump(existing, f, indent=2)
+            json.dump(existing, f, indent=2, default=_json_default)
 
     return {
         "edge_cases_run": len(results),
