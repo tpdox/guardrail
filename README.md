@@ -6,7 +6,7 @@
 
 <br/>
 
-**Pre-merge impact analysis for dbt models.** guardrail reads your SQL diffs, reasons about what could break, generates targeted detection queries, and executes them — combining mechanical checks with LLM-powered semantic analysis inside Claude Code.
+**Pre-merge impact analysis for dbt models.** guardrail reads your SQL diffs, reasons about what could break, runs targeted detection queries, interprets the results, and delivers a curated verdict — not just numbers, but what they mean and what to do about them.
 
 <br/>
 
@@ -17,39 +17,41 @@
 
   Blast radius: 113 downstream models
 
-  ── Semantic Edge Cases ──────────────────────────────────────────────
-  HIGH  INNER JOIN on entity_spine may silently drop unmatched entities
-        → SELECT COUNT(*) ... WHERE l.entity_id IS NULL
-        → Result: 341 dropped rows
-        → Sample: entity_id=ACC-1042, entity_id=ACC-3891, ...
+  ── Semantic Edge Cases ──────────────────── 2 investigate · 4 clear ──
 
-  MEDIUM  New WHERE clause excludes lead_type values not in original filter
-          → 3 lead_type values affected: 'Enrichment Inbound' (892 rows)
+  INVESTIGATE  93.2% NULL on FUNNEL_CW_LOCATIONS (113,509 of 121,839 rows)
+    verdict: Only 6.8% of entity-months have CW attribution. If CW
+    coverage should be higher, check the ENTITY_ID + FORM_MONTH join
+    condition on INT_GTM_AQL_CW_OUTCOMES.
+
+  EXPECTED  58% of entity-months filtered out by WHERE clause
+    verdict: By design — the spine limits to AQL leads and CW-attributed
+    records. The 50,886 kept rows are the valid funnel population.
+
+  CLEAR  0 dropped entities from INNER JOIN to aql_leads
+  CLEAR  0 duplicate ENTITY_ID || FORM_MONTH keys
 
   ── Mechanical Checks ────────────────────────────────────────────────
   38 checks · 0 FAIL · 2 WARN · 36 PASS
-
-  WARN  null_rate       lead_id    3,241 nulls (2.7%) out of 121,087 rows
-  WARN  fk_match_rate   int_gtm_aql_cw_outcomes  118,432/121,087 match (97.81%)
 ```
 
 ---
 
 ## Why not just `dbt test`?
 
-dbt test runs the checks you've already defined. guardrail does that too — but it also reads your actual SQL diff and reasons about what could go wrong:
+dbt test runs the checks you've already defined. guardrail does that too — but it also reads your actual SQL diff, reasons about what could go wrong, runs queries to check, and **writes a verdict explaining what the results mean**:
 
 | | `dbt test` | guardrail |
 |---|---|---|
-| **Semantic analysis** | None — only runs predefined tests | Reads the diff, identifies edge cases, generates + executes targeted SQL |
-| **Output** | Pass/fail per test | Quantitative: "3,241 nulls (2.7%) out of 121,087 rows" |
+| **Semantic analysis** | None — only runs predefined tests | Reads the diff, generates edge case SQL, executes it, interprets the results |
+| **Verdicts** | Pass/fail | "93% NULL rate is expected from LEFT JOIN — but verify CW coverage rate" |
 | **Catches what you didn't test for** | No | Yes — "your LEFT→INNER JOIN change drops 341 rows" |
 | **Failing rows** | Not shown | Sample of actual failing rows on WARN/FAIL |
 | **Blast radius** | Not computed | Full downstream dependency graph |
 | **Scope** | You specify `--select` | Auto-detects changed models from `git diff` |
 | **Interface** | CLI output | Conversational + interactive HTML dashboard |
 
-The semantic analysis is the main differentiator. A developer changes a LEFT JOIN to INNER JOIN — dbt test won't catch the silently dropped rows unless there's a specific test for it. guardrail reads the diff, reasons "this could drop rows where the join key doesn't match," generates a COUNT query, executes it, and tells you exactly how many rows are affected.
+The semantic analysis is the main differentiator. A developer changes a LEFT JOIN to INNER JOIN — dbt test won't catch the silently dropped rows unless there's a specific test for it. guardrail reads the diff, reasons "this could drop rows where the join key doesn't match," generates a COUNT query, executes it, and writes a verdict: "341 dropped rows — investigate before merge."
 
 ## How it works
 
@@ -69,11 +71,16 @@ manifest.json ──→ git diff (changed models) ──→ blast radius (BFS do
                          │
                   executes against Snowflake
                          │
-               semantic edge case results (HIGH/MEDIUM/LOW)
+                  Claude Code reads the results back
+                  and writes a verdict for each one
                          │
-                         ├── results.json (mechanical + semantic)
-                         ├── compare.csv (sorted by severity)
-                         └── dashboard.html (semantic section + Plotly charts)
+               ┌─────────┼─────────┐
+               │         │         │
+            clear    expected   investigate / action_required
+               │         │         │
+               └─────────┼─────────┘
+                         │
+                  dashboard.html (sorted by severity, verdicts front and center)
 ```
 
 ## Install
@@ -145,10 +152,11 @@ join_keys:
 |------|-------------|
 | `guardrail_status` | Changed models, blast radius, manifest age, last review summary |
 | `guardrail_review` | Mechanical checks: generate SQL, execute, quantitative PASS/WARN/FAIL |
-| `guardrail_model_context` | Returns diff + raw SQL + metadata for LLM edge case analysis |
+| `guardrail_model_context` | Returns diff + raw SQL + metadata for semantic analysis |
 | `guardrail_run_edge_cases` | Executes LLM-generated edge case SQL and stores results |
+| `guardrail_interpret_results` | Writes verdicts (clear/expected/investigate/action_required) for each edge case |
 | `guardrail_checks` | Preview generated SQL without executing |
-| `guardrail_dashboard` | HTML dashboard with semantic + mechanical results |
+| `guardrail_dashboard` | HTML dashboard with verdicts, semantic + mechanical results |
 
 ### Programmatic
 
@@ -187,26 +195,31 @@ guardrail generates checks from your existing dbt test metadata — no extra con
 | **WARN** | Unexpected values, low FK match, or null rate > 0.1% | Review before merge |
 | **PASS** | All thresholds met | No action needed |
 
-### Semantic edge cases
+### Semantic verdicts
 
-| Risk | What it means | Action |
-|------|--------------|--------|
-| **HIGH** | LLM identified a change likely to silently drop/corrupt data | Investigate before merge |
-| **MEDIUM** | Change may have unintended side effects | Review recommended |
-| **LOW** | Observation worth noting | Informational |
+The LLM reads each edge case result and classifies it:
+
+| Verdict | What it means | Dashboard |
+|---------|--------------|-----------|
+| **action_required** | Definite problem — explains what's wrong and what to fix | Red accent, sorted first |
+| **investigate** | Surprising result — explains what's unusual and what to check | Yellow accent |
+| **expected** | Non-zero but normal — explains why the numbers are fine | Green accent |
+| **clear** | Count is zero, no issue exists | Dimmed, sorted last |
+
+Each verdict references specific numbers from the query results and explains the reasoning.
 
 ## Dashboard
 
 Every review generates an interactive HTML dashboard at `<dbt_project>/.guardrail/dashboard.html`:
 
-- **Semantic edge cases** at the top — risk-badged cards with SQL and sample rows
+- **Semantic verdicts at the top** — sorted by severity (action_required → investigate → expected → clear)
+- **Verdict blocks** on every edge case — the LLM's interpretation in plain English
+- **Result data inline** — formatted numbers, distribution tables, sample rows
+- **SQL collapsed** behind "show sql" toggles — evidence is available but doesn't dominate
 - **Dark theme** with collapsible sections per check category
 - **Plotly bar charts** for value distributions (accepted_values checks)
-- **Expandable sample rows** on FAIL/WARN results — click "show rows" to see the actual data
-- **Blast radius** listed with downstream dependency arrows
+- **Blast radius** listed with downstream dependency count
 - **Color-coded** FAIL (red) / WARN (yellow) / PASS (green) with auto-expansion of problem sections
-
-Run `guardrail_dashboard` (or `/guardrail` which opens it automatically) to generate and open in your browser.
 
 ## Output files
 
@@ -214,9 +227,9 @@ After each review, guardrail writes to `<dbt_project>/.guardrail/`:
 
 | File | Contents |
 |------|----------|
-| `results.json` | Mechanical + semantic results with timestamps, model list, blast radius |
+| `results.json` | Mechanical + semantic results with verdicts, timestamps, model list, blast radius |
 | `compare.csv` | Sorted by severity (FAIL > WARN > PASS) for quick scanning |
-| `dashboard.html` | Interactive dashboard with collapsible sections and Plotly distribution charts |
+| `dashboard.html` | Interactive dashboard with verdict blocks, collapsible sections, Plotly charts |
 
 ## Plugin extras
 
@@ -250,7 +263,7 @@ guardrail/
 ├── config.py            # YAML config loading with env var expansion
 ├── git.py               # Git diff for changed model detection
 └── templates/
-    └── dashboard.html   # Plotly + dark theme dashboard template
+    └── dashboard.html   # Dark theme dashboard with verdict rendering
 ```
 
 ## License
