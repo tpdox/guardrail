@@ -1,0 +1,12 @@
+{
+  "name": "tpdox",
+  "owner": { "name": "tpdox" },
+  "plugins": [
+    {
+      "name": "guardrail",
+      "version": "0.1.0",
+      "source": "./plugin",
+      "description": "dbt model review MCP server — automated grain, distribution, join, and rowcount checks"
+    }
+  ]
+}

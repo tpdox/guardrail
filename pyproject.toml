@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "guardrail"
+version = "0.1.0"
+description = "dbt model review MCP server for Claude Code"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "snowflake-connector-python>=3.6.0",
+    "cryptography>=42.0.0",
+    "jinja2>=3.1.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
+[project.scripts]
+guardrail-mcp = "guardrail.server:main_sync"
+
+[tool.hatch.build.targets.wheel]
+packages = ["guardrail"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

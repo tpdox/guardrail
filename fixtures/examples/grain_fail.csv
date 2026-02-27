@@ -1,0 +1,7 @@
+status,category,model,check,importance,detail
+FAIL,grain,fact_gtm_aql_spine,pk_duplicates,TIER0,"142 duplicate unique_key values out of 52,699 rows"
+WARN,grain,fact_gtm_aql_spine,null_rate,HIGH,"53 nulls in entity_id (0.1%) out of 52,699 rows"
+PASS,distribution,fact_gtm_aql_spine,value_distribution,NORMAL,8 distinct values in channel
+PASS,distribution,fact_gtm_aql_spine,unexpected_values,HIGH,No unexpected values found
+PASS,join,fact_gtm_aql_spine,fk_match_rate,NORMAL,"52,699/52,699 rows match int_gtm_aql_entity_spine (100%)"
+PASS,rowcount,fact_gtm_aql_spine,row_count,NORMAL,"52,699 rows"

@@ -1,0 +1,8 @@
+{
+  "name": "guardrail",
+  "version": "0.1.0",
+  "description": "dbt model review MCP server for Claude Code",
+  "author": { "name": "tpdox" },
+  "repository": "https://github.com/tpdox/guardrail",
+  "keywords": ["dbt", "snowflake", "data-quality", "mcp"]
+}

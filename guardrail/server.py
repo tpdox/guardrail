@@ -1,0 +1,494 @@
+"""MCP server for guardrail — dbt model review tools."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server import Server
+
+from guardrail.blast import compute_blast_radius
+from guardrail.checks import generate_checks
+from guardrail.config import GuardrailConfig, find_config_path, load_config
+from guardrail.csv_writer import write_compare_csv
+from guardrail.dashboard import generate_dashboard
+from guardrail.evaluate import CheckResult, evaluate_check
+from guardrail.git import get_changed_model_paths, get_current_branch
+from guardrail.manifest import Manifest, load_manifest
+
+server = Server("guardrail")
+
+# Global state — initialized once per session
+_config: GuardrailConfig | None = None
+_sf_client = None  # lazy import to avoid import errors if snowflake not needed
+
+
+def _get_config() -> GuardrailConfig:
+    global _config
+    if _config is None:
+        _config = GuardrailConfig()
+    return _config
+
+
+def _get_snowflake_client():
+    global _sf_client
+    if _sf_client is None:
+        from guardrail.snowflake_client import SnowflakeClient
+        _sf_client = SnowflakeClient(_get_config().snowflake)
+    return _sf_client
+
+
+def _resolve_project_dir(arguments: dict) -> str:
+    """Resolve dbt_project_dir from arguments or config."""
+    return arguments.get("dbt_project_dir") or _get_config().dbt_project_dir
+
+
+def _guardrail_dir(dbt_project_dir: str) -> Path:
+    return Path(dbt_project_dir) / ".guardrail"
+
+
+def _load_last_review(dbt_project_dir: str) -> dict | None:
+    results_path = _guardrail_dir(dbt_project_dir) / "results.json"
+    if results_path.exists():
+        with open(results_path) as f:
+            return json.load(f)
+    return None
+
+
+# ── Tool Definitions ──
+
+
+TOOLS = [
+    types.Tool(
+        name="guardrail_status",
+        description=(
+            "Quick metadata about the dbt project state: manifest age, model count, "
+            "git branch, changed models, blast radius, and last review summary. "
+            "Call this first to orient before running a full review."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {
+                    "type": "string",
+                    "description": "Path to dbt project root. Defaults to config value.",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="guardrail_review",
+        description=(
+            "Full dbt model review pipeline. Parses manifest, detects changed models via git diff, "
+            "generates SQL checks (grain, distribution, join, rowcount), executes against Snowflake, "
+            "evaluates PASS/WARN/FAIL, and writes results. Returns structured JSON summary."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {
+                    "type": "string",
+                    "description": "Path to dbt project root.",
+                },
+                "models": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Model names to review. Defaults to git-changed models.",
+                },
+                "base_branch": {
+                    "type": "string",
+                    "description": "Git base branch for diff. Default: main.",
+                },
+                "skip_snowflake": {
+                    "type": "boolean",
+                    "description": "If true, generate checks but don't execute SQL.",
+                },
+                "checks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Check categories to run: grain, distribution, join, rowcount.",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="guardrail_checks",
+        description=(
+            "Show generated SQL checks without executing them. "
+            "Useful for reviewing or debugging the SQL that guardrail_review would run."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {"type": "string"},
+                "models": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Model names. Defaults to git-changed models.",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="guardrail_dashboard",
+        description=(
+            "Generate an HTML dashboard from the last review results and open in browser."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {"type": "string"},
+                "open_browser": {
+                    "type": "boolean",
+                    "description": "Open the dashboard in the default browser. Default: true.",
+                },
+            },
+        },
+    ),
+]
+
+
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return TOOLS
+
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    handlers = {
+        "guardrail_status": handle_status,
+        "guardrail_review": handle_review,
+        "guardrail_checks": handle_checks,
+        "guardrail_dashboard": handle_dashboard,
+    }
+    handler = handlers.get(name)
+    if handler is None:
+        return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+    try:
+        result = await handler(arguments)
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+    except Exception as e:
+        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+
+
+# ── Handlers ──
+
+
+async def handle_status(arguments: dict) -> dict:
+    project_dir = _resolve_project_dir(arguments)
+    if not project_dir:
+        return {"error": "dbt_project_dir not specified and not configured"}
+
+    manifest_path = Path(project_dir) / "target" / "manifest.json"
+    manifest_age = None
+    model_count = 0
+    test_count = 0
+
+    if manifest_path.exists():
+        mtime = os.path.getmtime(manifest_path)
+        manifest_age = round((time.time() - mtime) / 60, 1)
+        manifest = load_manifest(project_dir)
+        model_count = manifest.model_count
+        test_count = manifest.test_count
+
+    branch = get_current_branch(project_dir)
+    base = arguments.get("base_branch", _get_config().base_branch)
+    changed_paths = get_changed_model_paths(project_dir, base)
+
+    changed_models = []
+    blast_radius_names = []
+    if manifest_path.exists() and changed_paths:
+        manifest = load_manifest(project_dir)
+        changed_ids = []
+        for p in changed_paths:
+            uid = manifest.resolve_file_path(p)
+            if uid:
+                changed_ids.append(uid)
+                meta = manifest.get_model(uid)
+                if meta:
+                    changed_models.append(meta.name)
+
+        blast_ids = compute_blast_radius(manifest.child_map, changed_ids)
+        for bid in blast_ids:
+            meta = manifest.get_model(bid)
+            if meta:
+                blast_radius_names.append(meta.name)
+
+    last_review = _load_last_review(project_dir)
+    last_review_time = None
+    last_review_summary = None
+    if last_review:
+        last_review_time = last_review.get("timestamp")
+        s = last_review.get("summary", {})
+        last_review_summary = f"{s.get('fail', 0)} FAIL / {s.get('warn', 0)} WARN / {s.get('pass', 0)} PASS"
+
+    return {
+        "manifest_age_minutes": manifest_age,
+        "manifest_models": model_count,
+        "manifest_tests": test_count,
+        "git_branch": branch,
+        "git_base": base,
+        "changed_models": changed_models,
+        "blast_radius": blast_radius_names,
+        "last_review": last_review_time,
+        "last_review_summary": last_review_summary,
+    }
+
+
+async def handle_review(arguments: dict) -> dict:
+    project_dir = _resolve_project_dir(arguments)
+    if not project_dir:
+        return {"error": "dbt_project_dir not specified and not configured"}
+
+    start_time = time.time()
+    manifest = load_manifest(project_dir)
+    base = arguments.get("base_branch", _get_config().base_branch)
+    skip_sf = arguments.get("skip_snowflake", False)
+    check_categories = arguments.get("checks")
+
+    # Resolve models to review
+    model_names = arguments.get("models")
+    if not model_names:
+        changed_paths = get_changed_model_paths(project_dir, base)
+        model_names = []
+        changed_ids = []
+        for p in changed_paths:
+            uid = manifest.resolve_file_path(p)
+            if uid:
+                changed_ids.append(uid)
+                meta = manifest.get_model(uid)
+                if meta:
+                    model_names.append(meta.name)
+    else:
+        changed_ids = []
+        for name in model_names:
+            meta = manifest.get_model_by_name(name)
+            if meta:
+                changed_ids.append(meta.unique_id)
+
+    if not model_names:
+        return {"error": "No models to review. Specify models or ensure git diff finds changed models."}
+
+    # Blast radius
+    blast_ids = compute_blast_radius(manifest.child_map, changed_ids)
+    blast_names = []
+    for bid in blast_ids:
+        meta = manifest.get_model(bid)
+        if meta:
+            blast_names.append(meta.name)
+
+    # Generate checks
+    checks = generate_checks(
+        manifest, model_names,
+        categories=check_categories,
+        join_key_overrides=_get_config().join_keys,
+    )
+
+    # Execute or dry-run
+    results: list[CheckResult] = []
+    if skip_sf:
+        for check in checks:
+            results.append(CheckResult(
+                status="SKIP", category=check.category, model=check.model,
+                check=check.check, detail="Skipped (dry-run mode)",
+                importance=check.importance,
+            ))
+    else:
+        client = _get_snowflake_client()
+        for check in checks:
+            try:
+                rows = client.execute(check.sql)
+                result = evaluate_check(check, rows, _get_config().thresholds)
+                results.append(result)
+            except Exception as e:
+                results.append(CheckResult(
+                    status="FAIL", category=check.category, model=check.model,
+                    check=check.check, detail=f"SQL error: {str(e)}",
+                    importance=check.importance,
+                ))
+
+    # Summary
+    summary = {
+        "fail": sum(1 for r in results if r.status == "FAIL"),
+        "warn": sum(1 for r in results if r.status == "WARN"),
+        "pass": sum(1 for r in results if r.status == "PASS"),
+    }
+
+    duration = round(time.time() - start_time, 1)
+
+    # Write results
+    guardrail_dir = _guardrail_dir(project_dir)
+    guardrail_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = write_compare_csv(results, guardrail_dir / "compare.csv")
+
+    results_data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "models_reviewed": model_names,
+        "blast_radius": blast_names,
+        "duration_seconds": duration,
+        "results": [
+            {
+                "status": r.status,
+                "category": r.category,
+                "model": r.model,
+                "check": r.check,
+                "detail": r.detail,
+                "importance": r.importance,
+            }
+            for r in results
+        ],
+    }
+
+    with open(guardrail_dir / "results.json", "w") as f:
+        json.dump(results_data, f, indent=2)
+
+    return {
+        "summary": summary,
+        "models_reviewed": model_names,
+        "blast_radius": blast_names,
+        "results": results_data["results"],
+        "csv_path": str(csv_path),
+        "duration_seconds": duration,
+    }
+
+
+async def handle_checks(arguments: dict) -> dict:
+    project_dir = _resolve_project_dir(arguments)
+    if not project_dir:
+        return {"error": "dbt_project_dir not specified and not configured"}
+
+    manifest = load_manifest(project_dir)
+    base = _get_config().base_branch
+
+    model_names = arguments.get("models")
+    if not model_names:
+        changed_paths = get_changed_model_paths(project_dir, base)
+        model_names = []
+        for p in changed_paths:
+            uid = manifest.resolve_file_path(p)
+            if uid:
+                meta = manifest.get_model(uid)
+                if meta:
+                    model_names.append(meta.name)
+
+    if not model_names:
+        return {"error": "No models specified and no git-changed models found."}
+
+    checks = generate_checks(
+        manifest, model_names,
+        join_key_overrides=_get_config().join_keys,
+    )
+
+    return {
+        "checks": [
+            {
+                "category": c.category,
+                "model": c.model,
+                "check": c.check,
+                "sql": c.sql,
+                "importance": c.importance,
+            }
+            for c in checks
+        ],
+    }
+
+
+async def handle_dashboard(arguments: dict) -> dict:
+    project_dir = _resolve_project_dir(arguments)
+    if not project_dir:
+        return {"error": "dbt_project_dir not specified and not configured"}
+
+    last_review = _load_last_review(project_dir)
+    if not last_review:
+        return {"error": "No review results found. Run guardrail_review first."}
+
+    # Reconstruct CheckResult objects for the dashboard
+    results = []
+    for r in last_review.get("results", []):
+        results.append(CheckResult(
+            status=r["status"],
+            category=r["category"],
+            model=r["model"],
+            check=r["check"],
+            detail=r["detail"],
+            importance=r["importance"],
+        ))
+
+    branch = get_current_branch(project_dir)
+    open_browser = arguments.get("open_browser", True)
+
+    dashboard_path = generate_dashboard(
+        results=results,
+        branch=branch,
+        models_reviewed=last_review.get("models_reviewed", []),
+        blast_radius=last_review.get("blast_radius", []),
+        output_path=_guardrail_dir(project_dir) / "dashboard.html",
+        open_browser=open_browser,
+    )
+
+    sections = sum(1 for x in [
+        [r for r in results if r.category == "grain"],
+        [r for r in results if r.category == "distribution"],
+        [r for r in results if r.category == "join"],
+        [r for r in results if r.category == "rowcount"],
+        last_review.get("models_reviewed"),
+        last_review.get("blast_radius"),
+    ] if x)
+
+    dist_charts = sum(
+        1 for r in results
+        if r.category == "distribution" and r.check == "value_distribution"
+    )
+
+    return {
+        "dashboard_path": str(dashboard_path),
+        "opened": open_browser,
+        "sections": sections,
+        "charts": dist_charts,
+    }
+
+
+# ── Entry Point ──
+
+
+async def main_async():
+    """Async entry point for the MCP server."""
+    global _config
+
+    # Parse --config flag
+    config_path = None
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--config" and i + 1 < len(args):
+            config_path = args[i + 1]
+            break
+
+    if config_path is None:
+        config_path = find_config_path()
+
+    _config = load_config(config_path)
+
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
+
+
+def main_sync():
+    """Synchronous entry point for the console script."""
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main_sync()

@@ -1,0 +1,10 @@
+status,category,model,check,importance,detail
+PASS,grain,fact_gtm_aql_spine,pk_duplicates,TIER0,"0 duplicate unique_key values out of 52,557 rows"
+PASS,grain,fact_gtm_aql_spine,null_rate,HIGH,"0 nulls in unique_key (0%) out of 52,557 rows"
+WARN,distribution,fact_gtm_aql_spine,unexpected_values,HIGH,"1 unexpected value(s): 'TikTok (new)' (23 rows)"
+PASS,join,fact_gtm_aql_spine,fk_match_rate,NORMAL,"52,557/52,557 rows match int_gtm_aql_entity_spine (100%)"
+PASS,rowcount,fact_gtm_aql_spine,row_count,NORMAL,"52,557 rows"
+FAIL,grain,int_gtm_aql_form_dates,pk_duplicates,TIER0,"89 duplicate lead_id values out of 203,412 rows"
+PASS,grain,int_gtm_aql_form_dates,null_rate,HIGH,"0 nulls in lead_id (0%) out of 203,412 rows"
+WARN,join,int_gtm_aql_form_dates,fk_match_rate,NORMAL,"199,823/203,412 rows match stg_hubspot__contact_property_history (98.2%)"
+PASS,rowcount,int_gtm_aql_form_dates,row_count,NORMAL,"203,412 rows"

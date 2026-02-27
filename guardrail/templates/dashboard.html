@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>guardrail Review — {{ branch }}</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --fail: #f85149;
+  --fail-bg: #f8514920;
+  --warn: #d29922;
+  --warn-bg: #d2992220;
+  --pass: #3fb950;
+  --pass-bg: #3fb95020;
+  --accent: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; }
+
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* Signal Strip */
+.signal-strip {
+  display: flex; align-items: center; gap: 16px;
+  padding: 16px 20px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; margin-bottom: 24px; flex-wrap: wrap;
+}
+.signal-strip h1 { font-size: 18px; font-weight: 600; margin-right: auto; }
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border-radius: 20px; font-weight: 600; font-size: 13px;
+}
+.badge-fail { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail); }
+.badge-warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
+.badge-pass { background: var(--pass-bg); color: var(--pass); border: 1px solid var(--pass); }
+.meta { color: var(--text-muted); font-size: 12px; }
+
+/* Sections */
+.section {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; margin-bottom: 16px; overflow: hidden;
+}
+.section-header {
+  padding: 12px 20px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 15px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  user-select: none;
+}
+.section-header:hover { background: #1c2129; }
+.section-header .arrow { transition: transform 0.2s; font-size: 12px; color: var(--text-muted); }
+.section-header.collapsed .arrow { transform: rotate(-90deg); }
+.section-body { padding: 16px 20px; }
+.section-body.hidden { display: none; }
+
+/* Result Table */
+.result-table { width: 100%; border-collapse: collapse; }
+.result-table th {
+  text-align: left; padding: 8px 12px; font-size: 12px;
+  text-transform: uppercase; color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.result-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.result-table tr:last-child td { border-bottom: none; }
+.result-table tr.row-fail { background: var(--fail-bg); }
+.result-table tr.row-warn { background: var(--warn-bg); }
+
+.status-dot {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 50%; margin-right: 6px;
+}
+.dot-fail { background: var(--fail); }
+.dot-warn { background: var(--warn); }
+.dot-pass { background: var(--pass); }
+
+/* Model Inventory */
+.model-card {
+  padding: 12px 16px; border: 1px solid var(--border);
+  border-radius: 6px; margin-bottom: 8px;
+}
+.model-name { font-weight: 600; color: var(--accent); }
+.model-detail { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
+
+/* Blast Radius */
+.blast-list { list-style: none; padding-left: 20px; }
+.blast-list li { padding: 4px 0; color: var(--text-muted); }
+.blast-list li::before { content: "→ "; color: var(--warn); }
+
+/* Charts */
+.chart-container { margin: 12px 0; }
+
+/* Print */
+@media print {
+  body { background: white; color: black; }
+  .section { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Signal Strip -->
+<div class="signal-strip">
+  <h1>guardrail Review</h1>
+  {% if fail_count > 0 %}<span class="badge badge-fail">{{ fail_count }} FAIL</span>{% endif %}
+  {% if warn_count > 0 %}<span class="badge badge-warn">{{ warn_count }} WARN</span>{% endif %}
+  <span class="badge badge-pass">{{ pass_count }} PASS</span>
+  <span class="meta">{{ branch }} · {{ timestamp }} · {{ total_count }} checks</span>
+</div>
+
+<!-- Model Inventory -->
+<div class="section">
+  <div class="section-header" onclick="toggleSection(this)">
+    <span class="arrow">▼</span> Model Inventory ({{ models_reviewed|length }} models)
+  </div>
+  <div class="section-body">
+    {% for model in models_reviewed %}
+    <div class="model-card">
+      <div class="model-name">{{ model }}</div>
+    </div>
+    {% endfor %}
+    {% if blast_radius %}
+    <div style="margin-top: 12px;">
+      <strong style="color: var(--warn);">Blast Radius</strong>
+      <ul class="blast-list">
+        {% for b in blast_radius %}
+        <li>{{ b }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Grain Checks -->
+{% if grain_results %}
+<div class="section" id="grain-section">
+  <div class="section-header" onclick="toggleSection(this)">
+    <span class="arrow">▼</span> Grain Checks ({{ grain_results|length }})
+    {% set grain_fails = grain_results|selectattr('status', 'eq', 'FAIL')|list|length %}
+    {% set grain_warns = grain_results|selectattr('status', 'eq', 'WARN')|list|length %}
+    {% if grain_fails > 0 %}<span class="badge badge-fail" style="font-size:11px;">{{ grain_fails }}</span>{% endif %}
+    {% if grain_warns > 0 %}<span class="badge badge-warn" style="font-size:11px;">{{ grain_warns }}</span>{% endif %}
+  </div>
+  <div class="section-body">
+    <table class="result-table">
+      <thead><tr><th>Status</th><th>Check</th><th>Model</th><th>Detail</th><th>Tier</th></tr></thead>
+      <tbody>
+        {% for r in grain_results %}
+        <tr class="{% if r.status == 'FAIL' %}row-fail{% elif r.status == 'WARN' %}row-warn{% endif %}">
+          <td><span class="status-dot dot-{{ r.status|lower }}"></span>{{ r.status }}</td>
+          <td>{{ r.check }}</td>
+          <td>{{ r.model }}</td>
+          <td>{{ r.detail }}</td>
+          <td>{{ r.importance }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<!-- Distribution Checks -->
+{% if distribution_results %}
+<div class="section" id="dist-section">
+  <div class="section-header" onclick="toggleSection(this)">
+    <span class="arrow">▼</span> Distribution Checks ({{ distribution_results|length }})
+    {% set dist_warns = distribution_results|selectattr('status', 'eq', 'WARN')|list|length %}
+    {% if dist_warns > 0 %}<span class="badge badge-warn" style="font-size:11px;">{{ dist_warns }}</span>{% endif %}
+  </div>
+  <div class="section-body">
+    <table class="result-table">
+      <thead><tr><th>Status</th><th>Check</th><th>Model</th><th>Detail</th></tr></thead>
+      <tbody>
+        {% for r in distribution_results %}
+        <tr class="{% if r.status == 'WARN' %}row-warn{% endif %}">
+          <td><span class="status-dot dot-{{ r.status|lower }}"></span>{{ r.status }}</td>
+          <td>{{ r.check }}</td>
+          <td>{{ r.model }}</td>
+          <td>{{ r.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <!-- Plotly Distribution Charts -->
+    {% for chart in dist_charts %}
+    <div class="chart-container" id="{{ chart.id }}"></div>
+    <script>
+    Plotly.newPlot('{{ chart.id }}', [{
+      type: 'bar',
+      orientation: 'h',
+      y: {{ chart.labels | tojson }},
+      x: {{ chart.values | tojson }},
+      marker: { color: '#58a6ff' }
+    }], {
+      title: { text: '{{ chart.title }}', font: { color: '#e6edf3', size: 14 } },
+      paper_bgcolor: '#161b22',
+      plot_bgcolor: '#161b22',
+      font: { color: '#8b949e' },
+      xaxis: { gridcolor: '#30363d' },
+      yaxis: { gridcolor: '#30363d', automargin: true },
+      margin: { l: 150, r: 20, t: 40, b: 30 },
+      height: Math.max(200, {{ chart.labels|length }} * 30 + 80)
+    }, { responsive: true });
+    </script>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Join Checks -->
+{% if join_results %}
+<div class="section" id="join-section">
+  <div class="section-header" onclick="toggleSection(this)">
+    <span class="arrow">▼</span> Join Checks ({{ join_results|length }})
+    {% set join_fails = join_results|selectattr('status', 'eq', 'FAIL')|list|length %}
+    {% set join_warns = join_results|selectattr('status', 'eq', 'WARN')|list|length %}
+    {% if join_fails > 0 %}<span class="badge badge-fail" style="font-size:11px;">{{ join_fails }}</span>{% endif %}
+    {% if join_warns > 0 %}<span class="badge badge-warn" style="font-size:11px;">{{ join_warns }}</span>{% endif %}
+  </div>
+  <div class="section-body">
+    <table class="result-table">
+      <thead><tr><th>Status</th><th>Model</th><th>Detail</th></tr></thead>
+      <tbody>
+        {% for r in join_results %}
+        <tr class="{% if r.status == 'FAIL' %}row-fail{% elif r.status == 'WARN' %}row-warn{% endif %}">
+          <td><span class="status-dot dot-{{ r.status|lower }}"></span>{{ r.status }}</td>
+          <td>{{ r.model }}</td>
+          <td>{{ r.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<!-- Row Counts -->
+{% if rowcount_results %}
+<div class="section" id="rowcount-section">
+  <div class="section-header collapsed" onclick="toggleSection(this)">
+    <span class="arrow">▼</span> Row Counts ({{ rowcount_results|length }})
+  </div>
+  <div class="section-body hidden">
+    <table class="result-table">
+      <thead><tr><th>Status</th><th>Model</th><th>Count</th></tr></thead>
+      <tbody>
+        {% for r in rowcount_results %}
+        <tr class="{% if r.status == 'FAIL' %}row-fail{% endif %}">
+          <td><span class="status-dot dot-{{ r.status|lower }}"></span>{{ r.status }}</td>
+          <td>{{ r.model }}</td>
+          <td>{{ r.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+</div>
+
+<script>
+function toggleSection(header) {
+  header.classList.toggle('collapsed');
+  const body = header.nextElementSibling;
+  body.classList.toggle('hidden');
+}
+
+// Auto-expand sections with FAIL or WARN, collapse PASS-only sections
+document.querySelectorAll('.section').forEach(section => {
+  const body = section.querySelector('.section-body');
+  const header = section.querySelector('.section-header');
+  const hasFail = section.querySelector('.row-fail, .badge-fail');
+  const hasWarn = section.querySelector('.row-warn, .badge-warn');
+  if (!hasFail && !hasWarn && section.id !== 'grain-section') {
+    header.classList.add('collapsed');
+    body.classList.add('hidden');
+  }
+});
+</script>
+</body>
+</html>

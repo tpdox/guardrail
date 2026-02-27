@@ -1,0 +1,25 @@
+# guardrail configuration
+# Copy to ~/.config/guardrail/guardrail.yml and update values for your environment.
+
+dbt_project_dir: ~/path/to/dbt-project
+base_branch: main
+
+snowflake:
+  account: your-account
+  user: YOUR_USER
+  warehouse: YOUR_WH
+  role: YOUR_ROLE
+  private_key_file: ~/path/to/rsa_key.p8
+
+# Custom thresholds (optional — these are the defaults)
+thresholds:
+  null_rate_fail: 0.05     # > 5% nulls = FAIL
+  null_rate_warn: 0.001    # > 0.1% nulls = WARN
+  fk_match_rate_fail: 0.95 # < 95% FK match = FAIL
+  fk_match_rate_warn: 0.99 # < 99% FK match = WARN
+
+# Explicit join key overrides (optional)
+# Use when automatic inference from manifest tests is insufficient.
+# join_keys:
+#   fact_orders:
+#     stg_users: [user_id]
