@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from guardrail.manifest import Manifest, ModelMeta
 
 
+SAMPLE_LIMIT = 5
+
+
 @dataclass
 class Check:
     category: str       # grain, distribution, join, rowcount
@@ -15,6 +18,7 @@ class Check:
     sql: str            # SQL to execute
     importance: str     # TIER0, HIGH, NORMAL
     metadata: dict | None = None  # extra info (e.g., expected values)
+    sample_sql: str | None = None  # SQL to fetch example failing rows
 
 
 def generate_checks(
@@ -67,10 +71,17 @@ def _grain_checks(meta: ModelMeta) -> list[Check]:
             ),
             importance="TIER0",
             metadata={"column": col},
+            sample_sql=(
+                f"SELECT {col}, COUNT(*) AS occurrences "
+                f"FROM {meta.relation_name} "
+                f"GROUP BY {col} HAVING COUNT(*) > 1 "
+                f"ORDER BY occurrences DESC LIMIT {SAMPLE_LIMIT}"
+            ),
         ))
 
     # Null rate check — one per not_null-tested column
     for col in meta.not_null_tests:
+        select_cols = _pick_sample_columns(meta, col_to_exclude=col)
         checks.append(Check(
             category="grain",
             model=meta.name,
@@ -84,6 +95,11 @@ def _grain_checks(meta: ModelMeta) -> list[Check]:
             ),
             importance="HIGH",
             metadata={"column": col},
+            sample_sql=(
+                f"SELECT {select_cols} "
+                f"FROM {meta.relation_name} "
+                f"WHERE {col} IS NULL LIMIT {SAMPLE_LIMIT}"
+            ),
         ))
 
     return checks
@@ -162,6 +178,8 @@ def _join_checks(
         join_cond = " AND ".join(f"c.{col} = p.{col}" for col in join_cols)
         join_col_str = ", ".join(join_cols)
 
+        # Sample: show unmatched child rows
+        sample_select = ", ".join(f"c.{col}" for col in join_cols)
         checks.append(Check(
             category="join",
             model=meta.name,
@@ -177,6 +195,14 @@ def _join_checks(
             ),
             importance="NORMAL",
             metadata={"parent": parent.name, "join_cols": join_cols},
+            sample_sql=(
+                f"SELECT {sample_select}, COUNT(*) AS unmatched_rows "
+                f"FROM {meta.relation_name} c "
+                f"LEFT JOIN {parent.relation_name} p ON {join_cond} "
+                f"WHERE p.{join_cols[0]} IS NULL "
+                f"GROUP BY {sample_select} "
+                f"ORDER BY unmatched_rows DESC LIMIT {SAMPLE_LIMIT}"
+            ),
         ))
 
     return checks
@@ -191,3 +217,22 @@ def _rowcount_checks(meta: ModelMeta) -> list[Check]:
         sql=f"SELECT COUNT(*) AS row_count FROM {meta.relation_name}",
         importance="NORMAL",
     )]
+
+
+def _pick_sample_columns(meta: ModelMeta, col_to_exclude: str | None) -> str:
+    """Pick a handful of identifier columns for sample output.
+
+    Returns a comma-separated SQL column list (up to 4 columns).
+    Prefers columns with 'id' or 'name' in their name.
+    """
+    cols = [c for c in meta.columns if c != col_to_exclude]
+    if not cols:
+        return "*"
+
+    # Prioritize identifier-like columns, then take the rest
+    id_cols = [c for c in cols if "id" in c.lower() or "name" in c.lower() or "key" in c.lower()]
+    other_cols = [c for c in cols if c not in id_cols]
+    ordered = id_cols + other_cols
+
+    selected = ordered[:4]
+    return ", ".join(selected)

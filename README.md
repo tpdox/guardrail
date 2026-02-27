@@ -6,7 +6,7 @@
 
 <br/>
 
-**Pre-merge impact analysis for dbt models.** guardrail answers the questions `dbt test` doesn't: *how many* rows are affected, *which* downstream models break, and *what changed* on your branch — surfaced conversationally inside Claude Code.
+**Pre-merge impact analysis for dbt models.** guardrail answers the questions `dbt test` doesn't: *how many* rows are affected, *which* downstream models break, and *what changed* on your branch — surfaced conversationally inside Claude Code with an interactive HTML dashboard.
 
 <br/>
 
@@ -24,7 +24,10 @@
   38 checks · 0 FAIL · 2 WARN · 36 PASS
 
   WARN  null_rate       lead_id    3,241 nulls (2.7%) out of 121,087 rows
+        ↳ sample rows: entity_id=ACC-1042, form_date=2026-01-15, grain_type=Enrichment
+                        entity_id=ACC-3891, form_date=2026-02-01, grain_type=48hr
   WARN  fk_match_rate   int_gtm_aql_cw_outcomes  118,432/121,087 rows match (97.81%)
+        ↳ sample rows: unique_key=AQL-9981 (341 unmatched), unique_key=AQL-8832 (12 unmatched)
 ```
 
 ---
@@ -36,10 +39,11 @@ guardrail reads your existing dbt tests (unique, not_null, accepted_values, rela
 | | `dbt test` | guardrail |
 |---|---|---|
 | **Output** | Binary pass/fail | Quantitative: "3,241 nulls (2.7%) out of 121,087 rows" |
+| **Failing rows** | Not shown | Sample of actual failing rows on WARN/FAIL |
 | **Blast radius** | Not computed | Full downstream dependency graph of changed models |
 | **Scope** | You specify `--select` | Auto-detects changed models from `git diff` |
 | **Requires** | Full dbt environment | Just `manifest.json` + Snowflake creds |
-| **Interface** | CLI output | Conversational (MCP tools in Claude Code) + HTML dashboard |
+| **Interface** | CLI output | Conversational + interactive HTML dashboard with Plotly charts |
 | **Thresholds** | Pass or fail (with optional warn severity) | Configurable WARN/FAIL thresholds per check type |
 
 The blast radius alone is worth it — knowing that your change to `int_gtm_aql_leads` affects 113 downstream models before you merge is the kind of context that prevents broken dashboards.
@@ -151,11 +155,11 @@ guardrail generates checks from your existing dbt test metadata — no extra con
 
 | dbt test | guardrail check | What you get back |
 |----------|----------------|-------------------|
-| `unique` | `pk_duplicates` | "0 duplicates out of 121,087 rows" or "847 duplicate order_id values" |
-| `not_null` | `null_rate` | "3,241 nulls in lead_id (2.7%) out of 121,087 rows" |
-| `accepted_values` | `unexpected_values` | "2 unexpected value(s): 'Grader Pro' (341 rows), 'Unknown' (12 rows)" |
-| `accepted_values` | `value_distribution` | Full value breakdown with counts and percentages (+ Plotly chart) |
-| model `depends_on` | `fk_match_rate` | "118,432/121,087 rows match int_gtm_aql_cw_outcomes (97.81%)" |
+| `unique` | `pk_duplicates` | "847 duplicate order_id values" + sample of duplicate keys |
+| `not_null` | `null_rate` | "3,241 nulls in lead_id (2.7%)" + sample rows where column is null |
+| `accepted_values` | `unexpected_values` | "'Grader Pro' (341 rows), 'Unknown' (12 rows)" |
+| `accepted_values` | `value_distribution` | Full value breakdown with Plotly chart |
+| model `depends_on` | `fk_match_rate` | "118,432/121,087 match (97.81%)" + sample unmatched rows |
 | *(always)* | `row_count` | "121,087 rows" or FAIL if empty |
 
 ## Interpreting results
@@ -166,6 +170,18 @@ guardrail generates checks from your existing dbt test metadata — no extra con
 | **FAIL** (HIGH) | Null rate > 5% on not_null column | Investigate immediately |
 | **WARN** | Unexpected values, low FK match, or null rate > 0.1% | Review before merge |
 | **PASS** | All thresholds met | No action needed |
+
+## Dashboard
+
+Every review generates an interactive HTML dashboard at `<dbt_project>/.guardrail/dashboard.html`:
+
+- **Dark theme** with collapsible sections per check category
+- **Plotly bar charts** for value distributions (accepted_values checks)
+- **Expandable sample rows** on FAIL/WARN results — click "show rows" to see the actual data
+- **Blast radius** listed with downstream dependency arrows
+- **Color-coded** FAIL (red) / WARN (yellow) / PASS (green) with auto-expansion of problem sections
+
+Run `guardrail_dashboard` (or `/guardrail` which opens it automatically) to generate and open in your browser.
 
 ## Output files
 
@@ -191,7 +207,7 @@ When installed as a Claude Code plugin:
 git clone https://github.com/tpdox/guardrail.git
 cd guardrail
 uv sync --extra dev
-uv run pytest tests/ -v       # 48 tests
+uv run pytest tests/ -v       # 56 tests
 ```
 
 ## Architecture

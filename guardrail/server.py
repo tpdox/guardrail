@@ -306,6 +306,12 @@ async def handle_review(arguments: dict) -> dict:
             try:
                 rows = client.execute(check.sql)
                 result = evaluate_check(check, rows, _get_config().thresholds)
+                # Fetch sample rows for FAIL/WARN checks
+                if result.status in ("FAIL", "WARN") and check.sample_sql:
+                    try:
+                        result.sample_data = client.execute(check.sample_sql)
+                    except Exception:
+                        pass  # sampling is best-effort
                 results.append(result)
             except Exception as e:
                 results.append(CheckResult(
@@ -343,6 +349,7 @@ async def handle_review(arguments: dict) -> dict:
                 "check": r.check,
                 "detail": r.detail,
                 "importance": r.importance,
+                **({"sample_data": r.sample_data} if r.sample_data else {}),
             }
             for r in results
         ],
@@ -396,6 +403,7 @@ async def handle_checks(arguments: dict) -> dict:
                 "check": c.check,
                 "sql": c.sql,
                 "importance": c.importance,
+                **({"sample_sql": c.sample_sql} if c.sample_sql else {}),
             }
             for c in checks
         ],
@@ -421,6 +429,7 @@ async def handle_dashboard(arguments: dict) -> dict:
             check=r["check"],
             detail=r["detail"],
             importance=r["importance"],
+            sample_data=r.get("sample_data"),
         ))
 
     branch = get_current_branch(project_dir)

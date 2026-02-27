@@ -92,6 +92,29 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .blast-list li { padding: 4px 0; color: var(--text-muted); }
 .blast-list li::before { content: "→ "; color: var(--warn); }
 
+/* Sample Rows */
+.sample-toggle {
+  color: var(--accent); cursor: pointer; font-size: 12px;
+  text-decoration: underline; margin-left: 8px;
+}
+.sample-toggle:hover { color: #79c0ff; }
+.sample-table {
+  width: 100%; border-collapse: collapse; margin: 8px 0 4px 0;
+  font-size: 12px; background: #0d1117; border-radius: 4px;
+}
+.sample-table th {
+  text-align: left; padding: 4px 8px; font-size: 11px;
+  text-transform: uppercase; color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.sample-table td {
+  padding: 4px 8px; border-bottom: 1px solid #21262d;
+  font-family: 'SF Mono', Consolas, monospace; color: var(--text-muted);
+}
+.sample-table tr:last-child td { border-bottom: none; }
+.sample-wrap { display: none; padding: 4px 12px 8px; }
+.sample-wrap.visible { display: block; }
+
 /* Charts */
 .chart-container { margin: 12px 0; }
 
@@ -157,9 +180,19 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
           <td><span class="status-dot dot-{{ r.status|lower }}"></span>{{ r.status }}</td>
           <td>{{ r.check }}</td>
           <td>{{ r.model }}</td>
-          <td>{{ r.detail }}</td>
+          <td>{{ r.detail }}{% if r.sample_data %}<span class="sample-toggle" onclick="toggleSample('grain-sample-{{ loop.index }}')">show rows</span>{% endif %}</td>
           <td>{{ r.importance }}</td>
         </tr>
+        {% if r.sample_data %}
+        <tr><td colspan="5" style="padding:0; border:none;">
+          <div class="sample-wrap" id="grain-sample-{{ loop.index }}">
+            <table class="sample-table">
+              <thead><tr>{% for key in r.sample_data[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr></thead>
+              <tbody>{% for row in r.sample_data %}<tr>{% for val in row.values() %}<td>{{ val }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+            </table>
+          </div>
+        </td></tr>
+        {% endif %}
         {% endfor %}
       </tbody>
     </table>
@@ -234,8 +267,18 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
         <tr class="{% if r.status == 'FAIL' %}row-fail{% elif r.status == 'WARN' %}row-warn{% endif %}">
           <td><span class="status-dot dot-{{ r.status|lower }}"></span>{{ r.status }}</td>
           <td>{{ r.model }}</td>
-          <td>{{ r.detail }}</td>
+          <td>{{ r.detail }}{% if r.sample_data %}<span class="sample-toggle" onclick="toggleSample('join-sample-{{ loop.index }}')">show rows</span>{% endif %}</td>
         </tr>
+        {% if r.sample_data %}
+        <tr><td colspan="3" style="padding:0; border:none;">
+          <div class="sample-wrap" id="join-sample-{{ loop.index }}">
+            <table class="sample-table">
+              <thead><tr>{% for key in r.sample_data[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr></thead>
+              <tbody>{% for row in r.sample_data %}<tr>{% for val in row.values() %}<td>{{ val }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+            </table>
+          </div>
+        </td></tr>
+        {% endif %}
         {% endfor %}
       </tbody>
     </table>
@@ -273,6 +316,15 @@ function toggleSection(header) {
   header.classList.toggle('collapsed');
   const body = header.nextElementSibling;
   body.classList.toggle('hidden');
+}
+
+function toggleSample(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.classList.toggle('visible');
+    const toggle = event.target;
+    toggle.textContent = el.classList.contains('visible') ? 'hide rows' : 'show rows';
+  }
 }
 
 // Auto-expand sections with FAIL or WARN, collapse PASS-only sections

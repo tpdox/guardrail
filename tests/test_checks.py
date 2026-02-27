@@ -1,6 +1,6 @@
 """Tests for checks.py — SQL check generation."""
 
-from guardrail.checks import generate_checks
+from guardrail.checks import generate_checks, _pick_sample_columns
 from guardrail.manifest import Manifest
 
 
@@ -71,3 +71,52 @@ class TestCheckGeneration:
     def test_sql_uses_relation_name(self, two_models_manifest: Manifest):
         checks = generate_checks(two_models_manifest, ["fact_orders"], categories=["rowcount"])
         assert "DEV_DB.marts.fact_orders" in checks[0].sql
+
+    def test_pk_duplicates_has_sample_sql(self, two_models_manifest: Manifest):
+        checks = generate_checks(two_models_manifest, ["fact_orders"], categories=["grain"])
+        pk_checks = [c for c in checks if c.check == "pk_duplicates"]
+        assert pk_checks[0].sample_sql is not None
+        assert "GROUP BY" in pk_checks[0].sample_sql
+        assert "HAVING COUNT(*) > 1" in pk_checks[0].sample_sql
+
+    def test_null_rate_has_sample_sql(self, two_models_manifest: Manifest):
+        checks = generate_checks(two_models_manifest, ["fact_orders"], categories=["grain"])
+        null_checks = [c for c in checks if c.check == "null_rate"]
+        assert null_checks[0].sample_sql is not None
+        assert "IS NULL" in null_checks[0].sample_sql
+
+    def test_fk_match_rate_has_sample_sql(self, two_models_manifest: Manifest):
+        checks = generate_checks(two_models_manifest, ["fact_orders"], categories=["join"])
+        fk_checks = [c for c in checks if c.check == "fk_match_rate"]
+        assert fk_checks[0].sample_sql is not None
+        assert "IS NULL" in fk_checks[0].sample_sql
+
+    def test_distribution_checks_no_sample_sql(self, two_models_manifest: Manifest):
+        checks = generate_checks(two_models_manifest, ["fact_orders"], categories=["distribution"])
+        for c in checks:
+            assert c.sample_sql is None
+
+    def test_rowcount_no_sample_sql(self, two_models_manifest: Manifest):
+        checks = generate_checks(two_models_manifest, ["fact_orders"], categories=["rowcount"])
+        assert checks[0].sample_sql is None
+
+
+class TestPickSampleColumns:
+    def test_excludes_target_column(self, two_models_manifest: Manifest):
+        meta = two_models_manifest.get_model_by_name("fact_orders")
+        result = _pick_sample_columns(meta, col_to_exclude="order_id")
+        assert "order_id" not in result
+
+    def test_prioritizes_id_columns(self, two_models_manifest: Manifest):
+        meta = two_models_manifest.get_model_by_name("fact_orders")
+        result = _pick_sample_columns(meta, col_to_exclude=None)
+        # order_id and user_id should come first
+        cols = [c.strip() for c in result.split(",")]
+        id_cols = [c for c in cols if "id" in c.lower()]
+        assert len(id_cols) >= 1
+
+    def test_limits_to_four_columns(self, two_models_manifest: Manifest):
+        meta = two_models_manifest.get_model_by_name("fact_orders")
+        result = _pick_sample_columns(meta, col_to_exclude=None)
+        cols = [c.strip() for c in result.split(",")]
+        assert len(cols) <= 4

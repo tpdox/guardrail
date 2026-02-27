@@ -17,6 +17,7 @@ class CheckResult:
     detail: str
     importance: str
     raw_data: list[dict] | None = None
+    sample_data: list[dict] | None = None  # example failing rows
 
 
 def evaluate_check(
