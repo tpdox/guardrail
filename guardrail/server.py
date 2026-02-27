@@ -135,6 +135,21 @@ def _resolve_project_dir(arguments: dict) -> str:
     return arguments.get("dbt_project_dir") or _get_config().dbt_project_dir
 
 
+def _map_relation(relation_name: str) -> str:
+    """Apply schema_map from config to fix relation_name accessibility.
+
+    Many dbt projects compile with schemas like PUBLIC_accounts that differ
+    from what a read-only Snowflake role can access (e.g. ANALYTICS_ACCOUNTS).
+    The schema_map config option lets users bridge this gap.
+    """
+    config = _get_config()
+    for old_schema, new_schema in config.schema_map.items():
+        if old_schema in relation_name:
+            relation_name = relation_name.replace(old_schema, new_schema)
+            break
+    return relation_name
+
+
 def _guardrail_dir(dbt_project_dir: str) -> Path:
     return Path(dbt_project_dir) / ".guardrail"
 
@@ -407,21 +422,26 @@ async def handle_status(arguments: dict) -> dict:
 
     changed_models = []
     blast_radius_names = []
-    if manifest is not None and changed_paths:
+    if changed_paths:
         changed_ids = []
         for p in changed_paths:
-            uid = manifest.resolve_file_path(p)
-            if uid:
-                changed_ids.append(uid)
-                meta = manifest.get_model(uid)
-                if meta:
-                    changed_models.append(meta.name)
+            if manifest is not None:
+                uid = manifest.resolve_file_path(p)
+                if uid:
+                    changed_ids.append(uid)
+                    meta = manifest.get_model(uid)
+                    if meta:
+                        changed_models.append(meta.name)
+                    continue
+            # New model not in manifest — extract name from filename
+            changed_models.append(Path(p).stem)
 
-        blast_ids = compute_blast_radius(manifest.child_map, changed_ids)
-        for bid in blast_ids:
-            meta = manifest.get_model(bid)
-            if meta:
-                blast_radius_names.append(meta.name)
+        if manifest is not None and changed_ids:
+            blast_ids = compute_blast_radius(manifest.child_map, changed_ids)
+            for bid in blast_ids:
+                meta = manifest.get_model(bid)
+                if meta:
+                    blast_radius_names.append(meta.name)
 
     last_review = _load_last_review(project_dir)
     last_review_time = None
@@ -612,6 +632,56 @@ async def handle_checks(arguments: dict) -> dict:
     }
 
 
+def _extract_refs(sql_text: str) -> list[str]:
+    """Extract model names from {{ ref('...') }} calls in raw SQL."""
+    import re
+    return re.findall(r"\{\{\s*ref\(\s*['\"](\w+)['\"]\s*\)\s*\}\}", sql_text)
+
+
+def _build_context_for_new_model(
+    name: str, file_path: str, diff: str, manifest, last_review: dict | None,
+) -> dict:
+    """Build model context for a model not yet in the manifest (new file)."""
+    # Read the SQL directly from the file
+    raw_code = ""
+    full_path = Path(file_path)
+    if full_path.exists():
+        raw_code = full_path.read_text()
+
+    # Extract upstream refs from the SQL
+    refs = _extract_refs(raw_code)
+    upstream = []
+    upstream_tables = {}
+    for ref_name in refs:
+        ref_meta = manifest.get_model_by_name(ref_name)
+        if ref_meta:
+            upstream.append(ref_name)
+            upstream_tables[ref_name] = _map_relation(ref_meta.relation_name)
+
+    existing_results = []
+    if last_review:
+        for r in last_review.get("results", []):
+            if r.get("model") == name:
+                existing_results.append({
+                    "check": r["check"],
+                    "status": r["status"],
+                    "detail": r["detail"],
+                })
+
+    return {
+        "name": name,
+        "relation_name": "(new model — not yet materialized)",
+        "diff": diff,
+        "raw_code": raw_code,
+        "columns": [],
+        "upstream": upstream,
+        "upstream_tables": upstream_tables,
+        "downstream": [],
+        "existing_results": existing_results,
+        "is_new": True,
+    }
+
+
 async def handle_model_context(arguments: dict) -> dict:
     project_dir = _resolve_project_dir(arguments)
     if not project_dir:
@@ -623,8 +693,9 @@ async def handle_model_context(arguments: dict) -> dict:
     # Get diffs for all changed model files
     file_diffs = get_model_diffs(project_dir, base)
 
-    # Resolve model names
+    # Resolve model names — handle both manifest models and new files
     model_names = arguments.get("models")
+    new_model_paths = {}  # name -> file_path for models not in manifest
     if not model_names:
         changed_paths = get_changed_model_paths(project_dir, base)
         model_names = []
@@ -634,6 +705,12 @@ async def handle_model_context(arguments: dict) -> dict:
                 meta = manifest.get_model(uid)
                 if meta:
                     model_names.append(meta.name)
+            else:
+                # New model not in manifest — extract name from filename
+                fname = Path(p).stem
+                model_names.append(fname)
+                full_path = Path(project_dir) / p
+                new_model_paths[fname] = str(full_path)
 
     if not model_names:
         return {"error": "No models found. Specify models or ensure git diff finds changed models."}
@@ -643,6 +720,19 @@ async def handle_model_context(arguments: dict) -> dict:
 
     models_context = []
     for name in model_names:
+        # Check if this is a new model not in manifest
+        if name in new_model_paths:
+            diff = ""
+            for diff_path, diff_content in file_diffs.items():
+                if name in diff_path:
+                    diff = diff_content
+                    break
+            ctx = _build_context_for_new_model(
+                name, new_model_paths[name], diff, manifest, last_review
+            )
+            models_context.append(ctx)
+            continue
+
         meta = manifest.get_model_by_name(name)
         if not meta:
             continue
@@ -657,12 +747,16 @@ async def handle_model_context(arguments: dict) -> dict:
             if child_meta:
                 downstream.append(child_meta.name)
 
-        # Upstream model names
+        # Upstream model names + mapped relation_names
         upstream = []
+        upstream_tables = {}
         for parent_uid in meta.depends_on_models:
             parent_meta = manifest.get_model(parent_uid)
             if parent_meta:
                 upstream.append(parent_meta.name)
+                upstream_tables[parent_meta.name] = _map_relation(
+                    parent_meta.relation_name
+                )
 
         # Existing mechanical check results for this model
         existing_results = []
@@ -677,11 +771,12 @@ async def handle_model_context(arguments: dict) -> dict:
 
         models_context.append({
             "name": name,
-            "relation_name": meta.relation_name,
+            "relation_name": _map_relation(meta.relation_name),
             "diff": diff,
             "raw_code": meta.raw_code,
             "columns": meta.columns,
             "upstream": upstream,
+            "upstream_tables": upstream_tables,
             "downstream": downstream,
             "existing_results": existing_results,
         })

@@ -43,7 +43,7 @@ Run automated data quality checks and semantic edge case analysis against dbt mo
 
 ### Semantic Edge Case Analysis
 
-After mechanical checks, use `guardrail_model_context` to get the diff and raw SQL for each changed model. Then reason about what could go wrong:
+After mechanical checks, use `guardrail_model_context` to get the diff and raw SQL for each changed model. The response includes `upstream_tables` — a map of upstream model names to their fully-qualified, accessible Snowflake table names. **Always use these table names when writing edge case SQL**, not the raw `{{ ref('...') }}` names from the SQL. Then reason about what could go wrong:
 
 **What to look for:**
 - **JOIN type changes**: LEFT→INNER drops rows where the join key doesn't match; INNER→LEFT introduces NULLs in joined columns

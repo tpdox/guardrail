@@ -33,6 +33,7 @@ class GuardrailConfig:
     snowflake: SnowflakeConfig = field(default_factory=SnowflakeConfig)
     thresholds: Thresholds = field(default_factory=Thresholds)
     join_keys: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    schema_map: dict[str, str] = field(default_factory=dict)
 
 
 def _resolve_env(val: str) -> str:
@@ -97,5 +98,6 @@ def load_config(config_path: str | Path | None = None) -> GuardrailConfig:
     )
 
     cfg.join_keys = raw.get("join_keys", {})
+    cfg.schema_map = raw.get("schema_map", {})
 
     return cfg
