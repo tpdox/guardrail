@@ -37,7 +37,8 @@
       },
       "tags": ["marts"],
       "depends_on": { "nodes": ["model.test_project.stg_users"] },
-      "test_metadata": {}
+      "test_metadata": {},
+      "raw_code": "SELECT\n    o.order_id,\n    o.user_id,\n    o.status,\n    o.amount\nFROM {{ ref('stg_users') }} u\nLEFT JOIN raw.orders o ON u.user_id = o.user_id"
     },
     "model.test_project.dim_user_summary": {
       "unique_id": "model.test_project.dim_user_summary",

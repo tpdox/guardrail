@@ -19,6 +19,7 @@ def generate_dashboard(
     blast_radius: list[str],
     output_path: str | Path,
     open_browser: bool = False,
+    semantic_results: list[dict] | None = None,
 ) -> Path:
     """Generate an HTML dashboard from check results."""
     output_path = Path(output_path)
@@ -55,6 +56,7 @@ def generate_dashboard(
         join_results=join_results,
         rowcount_results=rowcount_results,
         dist_charts=dist_charts,
+        semantic_results=semantic_results or [],
     )
 
     output_path.write_text(html)

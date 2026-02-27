@@ -115,6 +115,34 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .sample-wrap { display: none; padding: 4px 12px 8px; }
 .sample-wrap.visible { display: block; }
 
+/* Semantic Edge Cases */
+.semantic-card {
+  padding: 14px 16px; border-left: 3px solid var(--accent);
+  background: #0d1117; border-radius: 0 6px 6px 0; margin-bottom: 10px;
+}
+.semantic-card.semantic-high { border-left-color: var(--fail); }
+.semantic-card.semantic-medium { border-left-color: var(--warn); }
+.semantic-card.semantic-low { border-left-color: var(--pass); }
+.semantic-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.risk-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+}
+.risk-high { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail); }
+.risk-medium { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
+.risk-low { background: var(--pass-bg); color: var(--pass); border: 1px solid var(--pass); }
+.semantic-model { font-weight: 600; color: var(--accent); font-size: 13px; }
+.semantic-desc { color: var(--text); font-size: 13px; margin-bottom: 8px; }
+.semantic-result {
+  background: var(--surface); padding: 8px 12px; border-radius: 4px;
+  font-size: 12px; margin-top: 6px;
+}
+.semantic-result code {
+  display: block; color: var(--text-muted); font-family: 'SF Mono', Consolas, monospace;
+  font-size: 11px; white-space: pre-wrap; word-break: break-all; margin-bottom: 4px;
+}
+.semantic-detail { color: var(--text); font-weight: 600; }
+
 /* Charts */
 .chart-container { margin: 12px 0; }
 
@@ -136,6 +164,45 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
   <span class="badge badge-pass">{{ pass_count }} PASS</span>
   <span class="meta">{{ branch }} · {{ timestamp }} · {{ total_count }} checks</span>
 </div>
+
+<!-- Semantic Edge Cases -->
+{% if semantic_results %}
+<div class="section" id="semantic-section">
+  <div class="section-header" onclick="toggleSection(this)">
+    <span class="arrow">▼</span> Semantic Edge Cases ({{ semantic_results|length }})
+    {% set sem_high = semantic_results|selectattr('risk', 'eq', 'HIGH')|list|length %}
+    {% set sem_med = semantic_results|selectattr('risk', 'eq', 'MEDIUM')|list|length %}
+    {% if sem_high > 0 %}<span class="badge badge-fail" style="font-size:11px;">{{ sem_high }} HIGH</span>{% endif %}
+    {% if sem_med > 0 %}<span class="badge badge-warn" style="font-size:11px;">{{ sem_med }} MED</span>{% endif %}
+  </div>
+  <div class="section-body">
+    {% for ec in semantic_results %}
+    <div class="semantic-card semantic-{{ ec.risk|lower }}">
+      <div class="semantic-header">
+        <span class="risk-badge risk-{{ ec.risk|lower }}">{{ ec.risk }}</span>
+        <span class="semantic-model">{{ ec.model }}</span>
+      </div>
+      <div class="semantic-desc">{{ ec.description }}</div>
+      {% if ec.result is defined %}
+      <div class="semantic-result">
+        <code>{{ ec.sql }}</code>
+        <div class="semantic-detail">Result: {{ ec.result }}</div>
+      </div>
+      {% endif %}
+      {% if ec.sample_data %}
+      <span class="sample-toggle" onclick="toggleSample('sem-sample-{{ loop.index }}')">show rows</span>
+      <div class="sample-wrap" id="sem-sample-{{ loop.index }}">
+        <table class="sample-table">
+          <thead><tr>{% for key in ec.sample_data[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr></thead>
+          <tbody>{% for row in ec.sample_data %}<tr>{% for val in row.values() %}<td>{{ val }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 <!-- Model Inventory -->
 <div class="section">

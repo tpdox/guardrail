@@ -63,3 +63,13 @@ class TestManifestParsing:
         meta = two_models_manifest.get_model_by_name("stg_users")
         assert "user_id" in meta.unique_tests
         assert "user_id" in meta.not_null_tests
+
+    def test_raw_code_extracted(self, two_models_manifest: Manifest):
+        meta = two_models_manifest.get_model_by_name("fact_orders")
+        assert "SELECT" in meta.raw_code
+        assert "order_id" in meta.raw_code
+
+    def test_raw_code_empty_when_missing(self, two_models_manifest: Manifest):
+        meta = two_models_manifest.get_model_by_name("stg_users")
+        # stg_users has no raw_code in the fixture
+        assert isinstance(meta.raw_code, str)

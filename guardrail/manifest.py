@@ -23,6 +23,7 @@ class ModelMeta:
     accepted_values_tests: dict[str, list[str]] = field(default_factory=dict)
     depends_on_models: list[str] = field(default_factory=list)
     child_models: list[str] = field(default_factory=list)
+    raw_code: str = ""
 
 
 class Manifest:
@@ -76,6 +77,7 @@ class Manifest:
             tags=node.get("tags", []),
             depends_on_models=depends_on,
             child_models=child_models,
+            raw_code=node.get("raw_code", ""),
         )
 
         # Extract tests from child_map

@@ -20,7 +20,7 @@ from guardrail.config import GuardrailConfig, find_config_path, load_config
 from guardrail.csv_writer import write_compare_csv
 from guardrail.dashboard import generate_dashboard
 from guardrail.evaluate import CheckResult, evaluate_check
-from guardrail.git import get_changed_model_paths, get_current_branch
+from guardrail.git import get_changed_model_paths, get_current_branch, get_model_diffs
 from guardrail.manifest import Manifest, load_manifest
 
 server = Server("guardrail")
@@ -137,6 +137,70 @@ TOOLS = [
         },
     ),
     types.Tool(
+        name="guardrail_model_context",
+        description=(
+            "Return diff, raw SQL, and metadata for changed models. "
+            "Use this to get everything needed to reason about semantic edge cases."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {
+                    "type": "string",
+                    "description": "Path to dbt project root.",
+                },
+                "models": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Model names. Defaults to git-changed models.",
+                },
+                "base_branch": {
+                    "type": "string",
+                    "description": "Git base branch for diff. Default: main.",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="guardrail_run_edge_cases",
+        description=(
+            "Execute semantic edge case SQL queries against Snowflake and store results. "
+            "Submit edge cases that Claude Code identified from analyzing model diffs."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {
+                    "type": "string",
+                    "description": "Path to dbt project root.",
+                },
+                "edge_cases": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "model": {"type": "string", "description": "Model name"},
+                            "description": {"type": "string", "description": "What could go wrong"},
+                            "risk": {
+                                "type": "string",
+                                "enum": ["HIGH", "MEDIUM", "LOW"],
+                                "description": "Risk level",
+                            },
+                            "sql": {"type": "string", "description": "SQL to detect the issue"},
+                            "sample_sql": {
+                                "type": "string",
+                                "description": "Optional SQL to fetch sample failing rows",
+                            },
+                        },
+                        "required": ["model", "description", "risk", "sql"],
+                    },
+                    "description": "Edge cases to execute.",
+                },
+            },
+            "required": ["edge_cases"],
+        },
+    ),
+    types.Tool(
         name="guardrail_dashboard",
         description=(
             "Generate an HTML dashboard from the last review results and open in browser."
@@ -166,6 +230,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         "guardrail_status": handle_status,
         "guardrail_review": handle_review,
         "guardrail_checks": handle_checks,
+        "guardrail_model_context": handle_model_context,
+        "guardrail_run_edge_cases": handle_run_edge_cases,
         "guardrail_dashboard": handle_dashboard,
     }
     handler = handlers.get(name)
@@ -410,6 +476,163 @@ async def handle_checks(arguments: dict) -> dict:
     }
 
 
+async def handle_model_context(arguments: dict) -> dict:
+    project_dir = _resolve_project_dir(arguments)
+    if not project_dir:
+        return {"error": "dbt_project_dir not specified and not configured"}
+
+    manifest = load_manifest(project_dir)
+    base = arguments.get("base_branch", _get_config().base_branch)
+
+    # Get diffs for all changed model files
+    file_diffs = get_model_diffs(project_dir, base)
+
+    # Resolve model names
+    model_names = arguments.get("models")
+    if not model_names:
+        changed_paths = get_changed_model_paths(project_dir, base)
+        model_names = []
+        for p in changed_paths:
+            uid = manifest.resolve_file_path(p)
+            if uid:
+                meta = manifest.get_model(uid)
+                if meta:
+                    model_names.append(meta.name)
+
+    if not model_names:
+        return {"error": "No models found. Specify models or ensure git diff finds changed models."}
+
+    # Load existing review results summary if available
+    last_review = _load_last_review(project_dir)
+
+    models_context = []
+    for name in model_names:
+        meta = manifest.get_model_by_name(name)
+        if not meta:
+            continue
+
+        # Find diff for this model's file path
+        diff = file_diffs.get(meta.original_file_path, "")
+
+        # Downstream model names (first hop)
+        downstream = []
+        for child_uid in meta.child_models:
+            child_meta = manifest.get_model(child_uid)
+            if child_meta:
+                downstream.append(child_meta.name)
+
+        # Upstream model names
+        upstream = []
+        for parent_uid in meta.depends_on_models:
+            parent_meta = manifest.get_model(parent_uid)
+            if parent_meta:
+                upstream.append(parent_meta.name)
+
+        # Existing mechanical check results for this model
+        existing_results = []
+        if last_review:
+            for r in last_review.get("results", []):
+                if r.get("model") == name:
+                    existing_results.append({
+                        "check": r["check"],
+                        "status": r["status"],
+                        "detail": r["detail"],
+                    })
+
+        models_context.append({
+            "name": name,
+            "relation_name": meta.relation_name,
+            "diff": diff,
+            "raw_code": meta.raw_code,
+            "columns": meta.columns,
+            "upstream": upstream,
+            "downstream": downstream,
+            "existing_results": existing_results,
+        })
+
+    return {"models": models_context}
+
+
+async def handle_run_edge_cases(arguments: dict) -> dict:
+    project_dir = _resolve_project_dir(arguments)
+    edge_cases = arguments.get("edge_cases", [])
+
+    if not edge_cases:
+        return {"error": "No edge cases provided."}
+
+    client = _get_snowflake_client()
+    results = []
+
+    for ec in edge_cases:
+        entry = {
+            "model": ec["model"],
+            "description": ec["description"],
+            "risk": ec["risk"],
+            "sql": ec["sql"],
+        }
+        try:
+            rows = client.execute(ec["sql"])
+            entry["raw_data"] = rows
+
+            # Determine if the result indicates a problem
+            flagged = False
+            if rows:
+                first_row = rows[0]
+                # Check for common count-based patterns
+                for val in first_row.values():
+                    if isinstance(val, (int, float)) and val > 0:
+                        flagged = True
+                        break
+                if not flagged:
+                    flagged = True  # Non-empty result set is itself a signal
+
+            entry["flagged"] = flagged
+
+            # Build a human-readable result summary
+            if not rows:
+                entry["result"] = "0 rows — no issue detected"
+            elif len(rows) == 1:
+                entry["result"] = ", ".join(
+                    f"{k}: {v}" for k, v in rows[0].items()
+                )
+            else:
+                entry["result"] = f"{len(rows)} rows returned"
+
+            # Fetch sample rows if flagged and sample_sql provided
+            if flagged and ec.get("sample_sql"):
+                try:
+                    entry["sample_data"] = client.execute(ec["sample_sql"])
+                except Exception:
+                    pass  # sampling is best-effort
+
+        except Exception as e:
+            entry["result"] = f"SQL error: {e}"
+            entry["flagged"] = True
+
+        results.append(entry)
+
+    # Merge into results.json
+    if project_dir:
+        guardrail_dir = _guardrail_dir(project_dir)
+        guardrail_dir.mkdir(parents=True, exist_ok=True)
+        results_path = guardrail_dir / "results.json"
+
+        existing = {}
+        if results_path.exists():
+            with open(results_path) as f:
+                existing = json.load(f)
+
+        existing["semantic_results"] = results
+        with open(results_path, "w") as f:
+            json.dump(existing, f, indent=2)
+
+    return {
+        "edge_cases_run": len(results),
+        "flagged": sum(1 for r in results if r.get("flagged")),
+        "results": results,
+    }
+
+
 async def handle_dashboard(arguments: dict) -> dict:
     project_dir = _resolve_project_dir(arguments)
     if not project_dir:
@@ -434,6 +657,7 @@ async def handle_dashboard(arguments: dict) -> dict:
 
     branch = get_current_branch(project_dir)
     open_browser = arguments.get("open_browser", True)
+    semantic_results = last_review.get("semantic_results", [])
 
     dashboard_path = generate_dashboard(
         results=results,
@@ -442,9 +666,11 @@ async def handle_dashboard(arguments: dict) -> dict:
         blast_radius=last_review.get("blast_radius", []),
         output_path=_guardrail_dir(project_dir) / "dashboard.html",
         open_browser=open_browser,
+        semantic_results=semantic_results,
     )
 
     sections = sum(1 for x in [
+        semantic_results,
         [r for r in results if r.category == "grain"],
         [r for r in results if r.category == "distribution"],
         [r for r in results if r.category == "join"],
