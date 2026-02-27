@@ -123,6 +123,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .semantic-card.semantic-high { border-left-color: var(--fail); }
 .semantic-card.semantic-medium { border-left-color: var(--warn); }
 .semantic-card.semantic-low { border-left-color: var(--pass); }
+.semantic-card.semantic-clear { border-left-color: var(--border); opacity: 0.65; }
 .semantic-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .risk-badge {
   display: inline-block; padding: 2px 8px; border-radius: 4px;
@@ -131,6 +132,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .risk-high { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail); }
 .risk-medium { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
 .risk-low { background: var(--pass-bg); color: var(--pass); border: 1px solid var(--pass); }
+.risk-clear { background: #30363d40; color: var(--text-muted); border: 1px solid var(--border); }
 .semantic-model { font-weight: 600; color: var(--accent); font-size: 13px; }
 .semantic-desc { color: var(--text); font-size: 13px; margin-bottom: 8px; }
 .semantic-result {
@@ -167,30 +169,51 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 <!-- Semantic Edge Cases -->
 {% if semantic_results %}
+{% set findings = [] %}
+{% set clear = [] %}
+{% for ec in semantic_results %}
+  {% if ec.get('flagged', true) and ec.get('result', '') and 'error' not in ec.get('result', '')|lower and ec.get('result', '') != 'No issue detected' %}
+    {% set _ = findings.append(ec) %}
+  {% else %}
+    {% set _ = clear.append(ec) %}
+  {% endif %}
+{% endfor %}
 <div class="section" id="semantic-section">
   <div class="section-header" onclick="toggleSection(this)">
-    <span class="arrow">▼</span> Semantic Edge Cases ({{ semantic_results|length }})
-    {% set sem_high = semantic_results|selectattr('risk', 'eq', 'HIGH')|list|length %}
-    {% set sem_med = semantic_results|selectattr('risk', 'eq', 'MEDIUM')|list|length %}
-    {% if sem_high > 0 %}<span class="badge badge-fail" style="font-size:11px;">{{ sem_high }} HIGH</span>{% endif %}
-    {% if sem_med > 0 %}<span class="badge badge-warn" style="font-size:11px;">{{ sem_med }} MED</span>{% endif %}
+    <span class="arrow">▼</span> Semantic Edge Cases
+    {% if findings %}<span class="badge badge-fail" style="font-size:11px;">{{ findings|length }} finding{{ 's' if findings|length != 1 }}</span>{% endif %}
+    {% if clear %}<span class="badge badge-pass" style="font-size:11px;">{{ clear|length }} clear</span>{% endif %}
   </div>
   <div class="section-body">
     {% for ec in semantic_results %}
-    <div class="semantic-card semantic-{{ ec.risk|lower }}">
+    {% set is_clear = not ec.get('flagged', true) or ec.get('result', '') == 'No issue detected' %}
+    <div class="semantic-card {% if is_clear %}semantic-clear{% else %}semantic-{{ ec.risk|lower }}{% endif %}">
       <div class="semantic-header">
+        {% if is_clear %}
+        <span class="risk-badge risk-clear">CLEAR</span>
+        {% else %}
         <span class="risk-badge risk-{{ ec.risk|lower }}">{{ ec.risk }}</span>
+        {% endif %}
         <span class="semantic-model">{{ ec.model }}</span>
       </div>
       <div class="semantic-desc">{{ ec.description }}</div>
       {% if ec.result is defined %}
       <div class="semantic-result">
-        <code>{{ ec.sql }}</code>
-        <div class="semantic-detail">Result: {{ ec.result }}</div>
+        <div class="semantic-detail">{{ ec.result }}</div>
+        {% if ec.raw_data is defined and ec.raw_data is iterable and ec.raw_data|length > 1 %}
+        <table class="sample-table" style="margin-top: 6px;">
+          <thead><tr>{% for key in ec.raw_data[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr></thead>
+          <tbody>{% for row in ec.raw_data %}<tr>{% for val in row.values() %}<td>{{ val }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        </table>
+        {% endif %}
+        <span class="sample-toggle" onclick="toggleSample('sem-sql-{{ loop.index }}')">show sql</span>
+        <div class="sample-wrap" id="sem-sql-{{ loop.index }}">
+          <code>{{ ec.sql }}</code>
+        </div>
       </div>
       {% endif %}
       {% if ec.sample_data %}
-      <span class="sample-toggle" onclick="toggleSample('sem-sample-{{ loop.index }}')">show rows</span>
+      <span class="sample-toggle" onclick="toggleSample('sem-sample-{{ loop.index }}')">show sample rows</span>
       <div class="sample-wrap" id="sem-sample-{{ loop.index }}">
         <table class="sample-table">
           <thead><tr>{% for key in ec.sample_data[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr></thead>

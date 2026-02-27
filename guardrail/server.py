@@ -30,6 +30,80 @@ _config: GuardrailConfig | None = None
 _sf_client = None  # lazy import to avoid import errors if snowflake not needed
 
 
+def _format_number(v) -> str:
+    """Format a number for human reading: commas, round percentages."""
+    if isinstance(v, float):
+        if v == int(v):
+            return f"{int(v):,}"
+        return f"{v:,.1f}"
+    if isinstance(v, int):
+        return f"{v:,}"
+    # Handle Decimal
+    from decimal import Decimal
+    if isinstance(v, Decimal):
+        if v == int(v):
+            return f"{int(v):,}"
+        return f"{float(v):,.1f}"
+    return str(v)
+
+
+def _format_result_row(row: dict) -> str:
+    """Format a single-row result into plain English."""
+    items = list(row.items())
+
+    # Special case: single count column
+    if len(items) == 1:
+        k, v = items[0]
+        label = k.lower().replace("_", " ")
+        return f"{_format_number(v)} {label}"
+
+    # Look for percentage columns to annotate
+    parts = []
+    pct_map = {}
+    for k, v in items:
+        kl = k.lower()
+        if kl.endswith("_pct") or kl.endswith("_percent") or kl.endswith("_rate"):
+            base = kl.replace("_pct", "").replace("_percent", "").replace("_rate", "")
+            pct_map[base] = v
+
+    for k, v in items:
+        kl = k.lower()
+        if kl.endswith("_pct") or kl.endswith("_percent") or kl.endswith("_rate"):
+            continue  # skip — will be inlined with the base column
+        label = kl.replace("_", " ")
+        base = kl
+        if base in pct_map:
+            parts.append(f"{_format_number(v)} {label} ({_format_number(pct_map[base])}%)")
+        else:
+            parts.append(f"{_format_number(v)} {label}")
+
+    return " · ".join(parts) if parts else ", ".join(f"{k}: {v}" for k, v in items)
+
+
+def _format_result_table(rows: list[dict]) -> str:
+    """Format multi-row results into a readable summary line."""
+    if not rows:
+        return "No rows returned"
+    # Try to summarize as label: count pairs
+    keys = list(rows[0].keys())
+    # If 2-3 columns and looks like a grouped distribution
+    if 2 <= len(keys) <= 3:
+        label_key = keys[0]
+        count_key = keys[1]
+        parts = []
+        for row in rows:
+            label = str(row[label_key])
+            count = row[count_key]
+            suffix = ""
+            if len(keys) == 3:
+                pct = row[keys[2]]
+                suffix = f" ({_format_number(pct)}%)"
+            parts.append(f"{label}: {_format_number(count)}{suffix}")
+        return " · ".join(parts)
+
+    return f"{len(rows)} rows returned"
+
+
 def _json_default(obj):
     """Handle Snowflake types (Decimal, datetime, etc.) for JSON serialization."""
     from decimal import Decimal
@@ -600,13 +674,11 @@ async def handle_run_edge_cases(arguments: dict) -> dict:
 
             # Build a human-readable result summary
             if not rows:
-                entry["result"] = "0 rows — no issue detected"
+                entry["result"] = "No issue detected"
             elif len(rows) == 1:
-                entry["result"] = ", ".join(
-                    f"{k}: {v}" for k, v in rows[0].items()
-                )
+                entry["result"] = _format_result_row(rows[0])
             else:
-                entry["result"] = f"{len(rows)} rows returned"
+                entry["result"] = _format_result_table(rows)
 
             # Fetch sample rows if flagged and sample_sql provided
             if flagged and ec.get("sample_sql"):
