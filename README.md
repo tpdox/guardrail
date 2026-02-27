@@ -6,7 +6,7 @@
 
 <br/>
 
-**Automated dbt model review that runs inside Claude Code.** Parses your manifest, detects changed models, generates SQL checks, executes them against Snowflake, and returns PASS/WARN/FAIL verdicts — all through MCP tools you can call conversationally.
+**Pre-merge impact analysis for dbt models.** guardrail answers the questions `dbt test` doesn't: *how many* rows are affected, *which* downstream models break, and *what changed* on your branch — surfaced conversationally inside Claude Code.
 
 <br/>
 
@@ -15,46 +15,54 @@
 
   Reviewing fact_gtm_aql_spine on feature/aql-spine-v4-dbt...
 
-  38 checks generated:
-    12 grain  ·  18 distribution  ·  7 join  ·  1 rowcount
+  Blast radius: 113 downstream models
+    fact_gtm_funnel → fact_gtm_funnel_aggregated → gtm_semantic_view
+    qa_gtm_summary
+    daily_channel_performance
+    ...
 
-  Results:  0 FAIL  ·  2 WARN  ·  36 PASS
+  38 checks · 0 FAIL · 2 WARN · 36 PASS
 
-  WARN  unexpected_values  product    2 unexpected value(s): 'Grader Pro' (341 rows), 'Unknown' (12 rows)
-  WARN  fk_match_rate      int_gtm_aql_cw_outcomes  118,432/121,087 rows match (97.81%)
+  WARN  null_rate       lead_id    3,241 nulls (2.7%) out of 121,087 rows
+  WARN  fk_match_rate   int_gtm_aql_cw_outcomes  118,432/121,087 rows match (97.81%)
 ```
 
 ---
 
-## What it checks
+## Why not just `dbt test`?
 
-| Category | Check | Severity | What it validates |
-|----------|-------|----------|-------------------|
-| **Grain** | `pk_duplicates` | TIER0 | Zero duplicate values in unique-tested columns |
-| **Grain** | `null_rate` | HIGH | Null rate under threshold for not_null-tested columns |
-| **Distribution** | `value_distribution` | NORMAL | Full breakdown of distinct values (informational) |
-| **Distribution** | `unexpected_values` | HIGH | No values outside accepted_values tests |
-| **Join** | `fk_match_rate` | NORMAL | FK match rate against parent models via inferred or explicit join keys |
-| **Rowcount** | `row_count` | NORMAL | Table is not empty |
+guardrail reads your existing dbt tests (unique, not_null, accepted_values, relationships) and runs the same validations. The checks themselves aren't new. What's different is everything around them:
 
-Checks are generated automatically from your **dbt manifest** — unique tests become PK checks, not_null tests become null rate checks, accepted_values tests become distribution checks, and model dependencies become join checks. No configuration required for the basics.
+| | `dbt test` | guardrail |
+|---|---|---|
+| **Output** | Binary pass/fail | Quantitative: "3,241 nulls (2.7%) out of 121,087 rows" |
+| **Blast radius** | Not computed | Full downstream dependency graph of changed models |
+| **Scope** | You specify `--select` | Auto-detects changed models from `git diff` |
+| **Requires** | Full dbt environment | Just `manifest.json` + Snowflake creds |
+| **Interface** | CLI output | Conversational (MCP tools in Claude Code) + HTML dashboard |
+| **Thresholds** | Pass or fail (with optional warn severity) | Configurable WARN/FAIL thresholds per check type |
+
+The blast radius alone is worth it — knowing that your change to `int_gtm_aql_leads` affects 113 downstream models before you merge is the kind of context that prevents broken dashboards.
 
 ## How it works
 
 ```
-manifest.json ──→ detect changed models (git diff) ──→ generate SQL checks
-                                                              │
-                                                              ▼
-                              PASS / WARN / FAIL  ◀── execute against Snowflake
-                                     │
-                                     ├──→ results.json
-                                     ├──→ compare.csv
-                                     └──→ dashboard.html (Plotly charts)
+manifest.json ──→ git diff (changed models) ──→ blast radius (BFS downstream)
+                                                         │
+                                               generate SQL checks
+                                                         │
+                                               execute against Snowflake
+                                                         │
+                                      quantitative PASS / WARN / FAIL
+                                                         │
+                                         ├── results.json
+                                         ├── compare.csv (sorted by severity)
+                                         └── dashboard.html (Plotly charts)
 ```
 
 ## Install
 
-### As a Claude Code plugin (recommended)
+### As a Claude Code plugin
 
 ```bash
 claude plugin marketplace add tpdox/guardrail
@@ -89,7 +97,6 @@ Config is searched in order: `$GUARDRAIL_CONFIG` env var > `~/.config/guardrail/
 <summary><b>Optional: custom thresholds and join keys</b></summary>
 
 ```yaml
-# Defaults shown — override as needed
 thresholds:
   null_rate_fail: 0.05      # > 5% nulls = FAIL
   null_rate_warn: 0.001     # > 0.1% nulls = WARN
@@ -111,7 +118,7 @@ join_keys:
 
 ```
 /guardrail                                  # review all git-changed models
-/guardrail status                           # project overview + last review
+/guardrail status                           # project overview + blast radius
 /guardrail fact_orders                      # review a specific model
 /guardrail fact_orders,dim_customers        # review multiple models
 ```
@@ -120,10 +127,10 @@ join_keys:
 
 | Tool | Description |
 |------|-------------|
-| `guardrail_status` | Manifest age, model count, git branch, changed models, blast radius, last review summary |
-| `guardrail_review` | Full pipeline: generate checks, execute SQL, evaluate results, write output files |
-| `guardrail_checks` | Preview generated SQL without executing — useful for debugging |
-| `guardrail_dashboard` | Generate HTML dashboard with Plotly charts from last review |
+| `guardrail_status` | Changed models, blast radius, manifest age, last review summary |
+| `guardrail_review` | Full pipeline: generate checks, execute SQL, quantitative results |
+| `guardrail_checks` | Preview generated SQL without executing |
+| `guardrail_dashboard` | HTML dashboard with Plotly charts from last review |
 
 ### Programmatic
 
@@ -138,6 +145,19 @@ for check in checks:
     print(f"[{check.category}] {check.check} — {check.sql[:80]}...")
 ```
 
+## What it checks
+
+guardrail generates checks from your existing dbt test metadata — no extra configuration needed:
+
+| dbt test | guardrail check | What you get back |
+|----------|----------------|-------------------|
+| `unique` | `pk_duplicates` | "0 duplicates out of 121,087 rows" or "847 duplicate order_id values" |
+| `not_null` | `null_rate` | "3,241 nulls in lead_id (2.7%) out of 121,087 rows" |
+| `accepted_values` | `unexpected_values` | "2 unexpected value(s): 'Grader Pro' (341 rows), 'Unknown' (12 rows)" |
+| `accepted_values` | `value_distribution` | Full value breakdown with counts and percentages (+ Plotly chart) |
+| model `depends_on` | `fk_match_rate` | "118,432/121,087 rows match int_gtm_aql_cw_outcomes (97.81%)" |
+| *(always)* | `row_count` | "121,087 rows" or FAIL if empty |
+
 ## Interpreting results
 
 | Status | When | Action |
@@ -147,37 +167,23 @@ for check in checks:
 | **WARN** | Unexpected values, low FK match, or null rate > 0.1% | Review before merge |
 | **PASS** | All thresholds met | No action needed |
 
-## Blast radius
-
-guardrail computes the full downstream impact of your changes by walking the manifest's dependency graph (BFS, max depth 10). This tells you exactly which models, exposures, and dashboards could break.
-
-```
-Changed:  int_gtm_aql_leads
-          ├── fact_gtm_aql_spine
-          │   └── qa_gtm_summary
-          ├── fact_gtm_funnel
-          │   ├── fact_gtm_funnel_aggregated
-          │   └── gtm_semantic_view
-          └── ... (113 downstream models)
-```
-
 ## Output files
 
 After each review, guardrail writes to `<dbt_project>/.guardrail/`:
 
-| File | Format | Contents |
-|------|--------|----------|
-| `results.json` | JSON | Full structured results with timestamps and metadata |
-| `compare.csv` | CSV | Sorted by severity (FAIL > WARN > PASS) for quick scanning |
-| `dashboard.html` | HTML | Interactive dashboard with collapsible sections and Plotly distribution charts |
+| File | Contents |
+|------|----------|
+| `results.json` | Structured results with timestamps, model list, blast radius |
+| `compare.csv` | Sorted by severity (FAIL > WARN > PASS) for quick scanning |
+| `dashboard.html` | Interactive dashboard with collapsible sections and Plotly distribution charts |
 
-## Plugin features
+## Plugin extras
 
-When installed as a Claude Code plugin, guardrail also includes:
+When installed as a Claude Code plugin:
 
-- **PostToolUse hook** — after any `dbt build` or `dbt run` command, suggests running a guardrail review
+- **PostToolUse hook** — after `dbt build` or `dbt run`, suggests running a review
 - **`/guardrail` slash command** — conversational interface with guided workflow
-- **Automatic model detection** — no need to specify models; guardrail diffs your branch against `main`
+- **Auto model detection** — diffs your branch against `main` automatically
 
 ## Development
 
