@@ -285,6 +285,56 @@ TOOLS = [
         },
     ),
     types.Tool(
+        name="guardrail_interpret_results",
+        description=(
+            "Write verdicts for semantic edge case results. Call this AFTER guardrail_run_edge_cases — "
+            "read the results, reason about each finding in context of the model's purpose and diff, "
+            "then submit your interpretation. Each verdict should say whether the result is expected, "
+            "concerning, or needs investigation, and WHY."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dbt_project_dir": {
+                    "type": "string",
+                    "description": "Path to dbt project root.",
+                },
+                "verdicts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {
+                                "type": "integer",
+                                "description": "0-based index of the edge case in semantic_results",
+                            },
+                            "verdict": {
+                                "type": "string",
+                                "description": (
+                                    "Plain English interpretation: is this expected or concerning? Why? "
+                                    "What should the developer do? Be specific and reference the actual numbers."
+                                ),
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["clear", "expected", "investigate", "action_required"],
+                                "description": (
+                                    "clear = no issue found (count is 0), "
+                                    "expected = numbers look normal for this model, "
+                                    "investigate = surprising result that needs a closer look, "
+                                    "action_required = definite problem that should be fixed before merge"
+                                ),
+                            },
+                        },
+                        "required": ["index", "verdict", "status"],
+                    },
+                    "description": "Verdicts for each edge case result.",
+                },
+            },
+            "required": ["verdicts"],
+        },
+    ),
+    types.Tool(
         name="guardrail_dashboard",
         description=(
             "Generate an HTML dashboard from the last review results and open in browser."
@@ -316,6 +366,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         "guardrail_checks": handle_checks,
         "guardrail_model_context": handle_model_context,
         "guardrail_run_edge_cases": handle_run_edge_cases,
+        "guardrail_interpret_results": handle_interpret_results,
         "guardrail_dashboard": handle_dashboard,
     }
     handler = handlers.get(name)
@@ -662,13 +713,23 @@ async def handle_run_edge_cases(arguments: dict) -> dict:
             flagged = False
             if rows:
                 first_row = rows[0]
+                has_numeric = False
                 # Check for common count-based patterns
                 for val in first_row.values():
-                    if isinstance(val, (int, float)) and val > 0:
-                        flagged = True
-                        break
-                if not flagged:
-                    flagged = True  # Non-empty result set is itself a signal
+                    if isinstance(val, (int, float)):
+                        has_numeric = True
+                        if val > 0:
+                            flagged = True
+                            break
+                    from decimal import Decimal
+                    if isinstance(val, Decimal):
+                        has_numeric = True
+                        if val > 0:
+                            flagged = True
+                            break
+                # Multi-row results (distributions etc.) are always findings
+                if not flagged and (len(rows) > 1 or not has_numeric):
+                    flagged = True
 
             entry["flagged"] = flagged
 
@@ -712,6 +773,45 @@ async def handle_run_edge_cases(arguments: dict) -> dict:
         "edge_cases_run": len(results),
         "flagged": sum(1 for r in results if r.get("flagged")),
         "results": results,
+    }
+
+
+async def handle_interpret_results(arguments: dict) -> dict:
+    """Write verdicts into stored semantic results."""
+    project_dir = _resolve_project_dir(arguments)
+    if not project_dir:
+        return {"error": "dbt_project_dir not specified and not configured"}
+
+    verdicts = arguments.get("verdicts", [])
+    if not verdicts:
+        return {"error": "No verdicts provided."}
+
+    results_path = _guardrail_dir(project_dir) / "results.json"
+    if not results_path.exists():
+        return {"error": "No results.json found. Run guardrail_run_edge_cases first."}
+
+    with open(results_path) as f:
+        data = json.load(f)
+
+    semantic = data.get("semantic_results", [])
+    updated = 0
+    for v in verdicts:
+        idx = v["index"]
+        if 0 <= idx < len(semantic):
+            semantic[idx]["verdict"] = v["verdict"]
+            semantic[idx]["verdict_status"] = v["status"]
+            # Fix flagged based on verdict status
+            if v["status"] in ("clear", "expected"):
+                semantic[idx]["flagged"] = False
+            updated += 1
+
+    data["semantic_results"] = semantic
+    with open(results_path, "w") as f:
+        json.dump(data, f, indent=2, default=_json_default)
+
+    return {
+        "updated": updated,
+        "total": len(semantic),
     }
 
 

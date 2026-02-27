@@ -144,6 +144,20 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
   font-size: 11px; white-space: pre-wrap; word-break: break-all; margin-bottom: 4px;
 }
 .semantic-detail { color: var(--text); font-weight: 600; }
+.semantic-verdict {
+  margin-top: 8px; padding: 8px 12px; border-radius: 4px;
+  font-size: 13px; line-height: 1.5; color: var(--text);
+}
+.verdict-clear, .verdict-expected { background: var(--pass-bg); border-left: 3px solid var(--pass); }
+.verdict-investigate { background: var(--warn-bg); border-left: 3px solid var(--warn); }
+.verdict-action_required { background: var(--fail-bg); border-left: 3px solid var(--fail); }
+.verdict-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 2px;
+}
+.verdict-clear .verdict-label, .verdict-expected .verdict-label { color: var(--pass); }
+.verdict-investigate .verdict-label { color: var(--warn); }
+.verdict-action_required .verdict-label { color: var(--fail); }
 
 /* Charts */
 .chart-container { margin: 12px 0; }
@@ -169,34 +183,50 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 <!-- Semantic Edge Cases -->
 {% if semantic_results %}
-{% set findings = [] %}
-{% set clear = [] %}
+{% set action_items = [] %}
+{% set investigate = [] %}
+{% set ok_items = [] %}
 {% for ec in semantic_results %}
-  {% if ec.get('flagged', true) and ec.get('result', '') and 'error' not in ec.get('result', '')|lower and ec.get('result', '') != 'No issue detected' %}
-    {% set _ = findings.append(ec) %}
+  {% set vs = ec.get('verdict_status', '') %}
+  {% if vs == 'action_required' %}
+    {% set _ = action_items.append(ec) %}
+  {% elif vs == 'investigate' %}
+    {% set _ = investigate.append(ec) %}
   {% else %}
-    {% set _ = clear.append(ec) %}
+    {% set _ = ok_items.append(ec) %}
   {% endif %}
 {% endfor %}
 <div class="section" id="semantic-section">
   <div class="section-header" onclick="toggleSection(this)">
     <span class="arrow">▼</span> Semantic Edge Cases
-    {% if findings %}<span class="badge badge-fail" style="font-size:11px;">{{ findings|length }} finding{{ 's' if findings|length != 1 }}</span>{% endif %}
-    {% if clear %}<span class="badge badge-pass" style="font-size:11px;">{{ clear|length }} clear</span>{% endif %}
+    {% if action_items %}<span class="badge badge-fail" style="font-size:11px;">{{ action_items|length }} action required</span>{% endif %}
+    {% if investigate %}<span class="badge badge-warn" style="font-size:11px;">{{ investigate|length }} investigate</span>{% endif %}
+    {% if ok_items %}<span class="badge badge-pass" style="font-size:11px;">{{ ok_items|length }} clear</span>{% endif %}
   </div>
   <div class="section-body">
-    {% for ec in semantic_results %}
-    {% set is_clear = not ec.get('flagged', true) or ec.get('result', '') == 'No issue detected' %}
-    <div class="semantic-card {% if is_clear %}semantic-clear{% else %}semantic-{{ ec.risk|lower }}{% endif %}">
+    {% for ec in action_items + investigate + ok_items %}
+    {% set vs = ec.get('verdict_status', '') %}
+    {% set is_ok = vs in ('clear', 'expected') %}
+    <div class="semantic-card {% if is_ok %}semantic-clear{% elif vs == 'investigate' %}semantic-medium{% elif vs == 'action_required' %}semantic-high{% else %}semantic-{{ ec.risk|lower }}{% endif %}">
       <div class="semantic-header">
-        {% if is_clear %}
-        <span class="risk-badge risk-clear">CLEAR</span>
+        {% if vs == 'action_required' %}
+        <span class="risk-badge risk-high">ACTION REQUIRED</span>
+        {% elif vs == 'investigate' %}
+        <span class="risk-badge risk-medium">INVESTIGATE</span>
+        {% elif vs in ('clear', 'expected') %}
+        <span class="risk-badge risk-clear">{{ vs|upper }}</span>
         {% else %}
         <span class="risk-badge risk-{{ ec.risk|lower }}">{{ ec.risk }}</span>
         {% endif %}
         <span class="semantic-model">{{ ec.model }}</span>
       </div>
       <div class="semantic-desc">{{ ec.description }}</div>
+      {% if ec.verdict is defined %}
+      <div class="semantic-verdict verdict-{{ vs }}">
+        <div class="verdict-label">verdict</div>
+        {{ ec.verdict }}
+      </div>
+      {% endif %}
       {% if ec.result is defined %}
       <div class="semantic-result">
         <div class="semantic-detail">{{ ec.result }}</div>

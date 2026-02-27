@@ -37,8 +37,9 @@ Run automated data quality checks and semantic edge case analysis against dbt mo
 3. **Get model context**: Call `guardrail_model_context` to get diffs, raw SQL, and metadata for changed models
 4. **Analyze edge cases**: Read the diff and SQL for each model. Reason about what could go wrong given the specific changes. Generate targeted SQL queries to detect those issues.
 5. **Execute edge cases**: Call `guardrail_run_edge_cases` with the edge cases you identified
-6. **Generate dashboard**: Call `guardrail_dashboard` to produce HTML report with both mechanical and semantic results
-7. **Summarize**: Present results to the user with actionable next steps
+6. **Interpret results**: Read every result from step 5. For each edge case, write a verdict explaining whether the result is expected or concerning, and why. Call `guardrail_interpret_results` with your verdicts. This is the most important step — the verdict is the intelligence.
+7. **Generate dashboard**: Call `guardrail_dashboard` to produce HTML report with both mechanical and semantic results
+8. **Summarize**: Present results to the user with actionable next steps
 
 ### Semantic Edge Case Analysis
 
@@ -51,6 +52,24 @@ After mechanical checks, use `guardrail_model_context` to get the diff and raw S
 - **NULL handling changes**: COALESCE added/removed, IFNULL changes can alter aggregation results
 - **Aggregation changes**: New GROUP BY columns change grain; modified window functions change row-level values
 - **CTE restructuring**: Reordered joins or new intermediate steps can change which rows survive
+
+**Writing verdicts (step 6):**
+
+After `guardrail_run_edge_cases` returns results, read every result carefully. For each edge case, write a verdict and classify it:
+
+| Status | When to use |
+|--------|-------------|
+| `clear` | Count is 0 — the hypothesized issue does not exist |
+| `expected` | Numbers are non-zero but normal for the model's purpose (e.g., a filter excluding 58% is by design) |
+| `investigate` | Surprising result that needs a closer look — explain what's unusual and what the developer should check |
+| `action_required` | Definite problem — explain what's wrong and what to fix |
+
+**Good verdicts reference specific numbers** from the result:
+- "0 dropped entities — the INNER JOIN is safe, every entity_spine row has a matching lead."
+- "58% of entity-months are filtered out. This is expected — the WHERE clause intentionally limits to AQL leads and CW-attributed records. Verify this matches the funnel definition."
+- "93% NULL rate on FUNNEL_CW_LOCATIONS is high. Since CW outcomes are LEFT JOINed, NULLs are expected for non-CW leads, but 93% suggests most entities lack CW attribution. Confirm this aligns with the known CW coverage rate."
+
+**Bad verdicts are vague**: "This looks fine" / "Might be an issue" / "Needs review"
 
 **Edge case format:**
 Each edge case MUST include:
@@ -116,10 +135,18 @@ Generate edge case descriptions + executable SQL queries.
 # Step 5: Execute edge cases
 Call guardrail_run_edge_cases with the edge cases array
 
-# Step 6: Generate dashboard
+# Step 6: Interpret results — THIS IS THE KEY STEP
+Read the results from step 5. For each edge case:
+- Look at the actual numbers returned
+- Consider the model's purpose and the diff context
+- Write a specific verdict explaining if this is expected or concerning
+- Classify as: clear / expected / investigate / action_required
+Call guardrail_interpret_results with your verdicts array
+
+# Step 7: Generate dashboard
 Call guardrail_dashboard to generate and open HTML with all results
 
-# Step 7: Summarize
+# Step 8: Summarize
 Present: N FAIL / N WARN / N PASS + N semantic findings with detail
 ```
 
